@@ -3,83 +3,200 @@
 use strict;
 use warnings;
 use Cwd qw(cwd);
-use File::Basename qw(dirname);
-use File::Path qw(mkpath);
-use File::Copy qw(copy);
-use File::stat qw(stat);
-use File::Spec::Functions qw(rel2abs);
 use Data::Dumper qw(Dumper);
-use POSIX qw(dup2);
+use Date::Format;
+use Date::Parse;
+use Encode qw(encode decode);
+use File::Basename qw(dirname);
+use File::Copy qw(copy);
+use File::Path qw(mkpath);
+use File::Spec::Functions qw(rel2abs);
+use File::stat qw(stat);
+use File::Temp qw(tempfile);
+use Getopt::Long;
 use IO::File;
 use IO::File qw();
-use Encode qw(encode decode);
-use File::Temp qw(tempfile);
-use Date::Parse;
-use Date::Format;
-use Getopt::Long;
+use POSIX qw(dup2);
 
 my %authors = (
 	'wasi'      => [ 'Thomas Egerer',      'thomas.washeim@gmx.net' ],
 );
 
-sub INITIAL() { return 0; }
-sub WAITING_FOR_RCS_FILE() { return 1; }
-sub PROCESSING_RCS_FILE() { return 2; }
-sub WAITING_FOR_REVISION() { return 3; }
-sub WAITING_FOR_INFOS() { return 4; }
-sub WAITING_FOR_BRANCH_INFOS() { return 5; }
-sub BUILDING_COMMIT_LOG() { return 6; }
+sub START() { return 0; }
+sub INITIAL() { return 1; }
+sub RCS_FILE() { return 2; }
+sub SKIP_TO_TAGS() { return 3; }
+sub PROCESS_TAGS() { return 4; }
+sub SKIP_TO_REVISION() { return 5; }
+sub SKIP_TO_INFOS() { return 6; }
+sub SKIP_TO_BRANCH_INFO() { return 7; }
+sub BUILD_COMMIT_LOG() { return 8; }
 
-sub create_commit_object(%$$)
+sub help()
 {
-	my ($commits, $filename, $infos) = @_;
-	my (@commit_tags, $commit_tag, $epoch);
+	die <<EOF;
+Usage: $0 --cvsdir <cvs_dir> --gitdir <git_dir>
+          [--maxcommits <max number of commits>]
+          [--squashdate <date up to which commits will be squashed>]
+          [--finisher <scriptlet>] [--remove-prefix <prefix>]
+          [--ignore-unknown] [--help]
 
-	if ($infos->{'state'} eq 'dead') {
-		$infos->{'rev'} = 'dead';
-	}
-	$epoch = str2time("$infos->{'date'} $infos->{'time'}");
+Convert CVS component in directory cvs-directory and store all commits
+in git_directory.
 
+cvs_directory is a working directory holding the component to convert
+and must be updated prior to running this script.
+
+git_directory must exist and a 'git init' must have been run. New
+commits will be appended to the current branch, so best create a new
+empty branch in the general case.
+
+optional parameter maxcommits can be set a positive value to indicate
+maximum number of commits to process.
+
+optional parameter squashdate can be set to a date to indicate that all
+files committed before that date will be squashed into in big commit.
+below is a list known to be understood by squashdate:
+	1995:01:24T09:08:17.1823213           ISO-8601
+	1995-01-24T09:08:17.1823213
+	Wed, 16 Jun 94 07:29:35 CST           Comma and day name are optional
+	Thu, 13 Oct 94 10:13:13 -0700
+	Wed, 9 Nov 1994 09:50:32 -0500 (EST)  Text in () will be ignored.
+	21 dec 17:05                          Will be parsed in the current time zone
+	21-dec 17:05
+	21/dec 17:05
+	21/dec/93 17:05
+	1999 10:02:18 "GMT"
+	16 Nov 94 22:28:20 PST
+
+the optional parameter finisher specifies a script run in gitdir, after
+the conversion process is (almost) finished; it can be used to issue
+filters etc; script is given cvsdir, gitdir and number of commits
+as command line arguments;
+
+the optional parameter ignore-unknown allows for unknown authors (i.e.
+those not included in authors hash to not cause this program to fail
+but to keep running modifying the commit message a little.
+
+the optional parameter remove-prefix is the prefix to be removed from
+path and defaults to '/export/sina/cvs/components/tgz/'
+
+EOF
+}
+
+################################################################################
+# generate_commit_hash - generate a commit hash from the infos of the file     #
+#                        currently processed to identify all files within this #
+#                        commit: <epoch>_|||_<commitid>_||_<author>,           #
+#                        sounds easier than it is since CVS does not generate  #
+#                        commit IDs all the time and if it does collisions are #
+#                        quite probable (I've seen them often)                 #
+# in:  quite obvious                                                           #
+# out: even more                                                               #
+################################################################################
+sub generate_commit_hash($$$)
+{
+	my ($epoch, $commitid, $author) = @_;
+
+	# for projects with commits prior to Sep 9 2001, 03:46:40 we must
+	# make sure that sorting succeeds when using the epoch value by
+	# prepending zeros so it is 10 digits long
+	sprintf('%010d', $epoch) . '_|||_' .  $commitid . '_|||_' . $author;
+}
+
+################################################################################
+# populate_commit_hash - looks for a suitable entry in <commits> and inserts   #
+#                        the pushes file info contained in <rinfos> into this  #
+#                        commits files array; if no entry is found, a new one  #
+#                        is generated and <count> is increased.                #
+# in:  commits - ref to commits hash                                           #
+#      rinfos  - ref to file info hash (will be wiped except for the filename) #
+#      count   - ref to number of commits, gets increased for a new one        #
+# out: filename                                                                #
+################################################################################
+sub populate_commit_hash(%$$)
+{
+	my ($commits, $rinfos, $count) = @_;
+	my (@commit_tags, $commit_tag, $epoch, $filename);
+
+	my $infos = $$rinfos;
+	$infos->{'rev'} = 'dead' if ($infos->{'state'} eq 'dead');
 	$infos->{'commitid'} = "<unknown>" if (!exists $infos->{'commitid'});
 
-	for my $i (-15 .. 15) {
-		push @commit_tags, (sprintf('%010d', ($epoch +$i)) . '|' . $infos->{'commitid'} . '|'  . $infos->{'author'});
-	}
+	$epoch = $infos->{'epoch'};
+	$filename = $infos->{'filename'};
 
-	foreach my $tag (@commit_tags) {
-		if (exists $commits->{$tag}) {
-			if ($commits->{$tag}->{'comment'} eq (join("\n", @{$infos->{'comment_lines'}}))) {
+	# CVS commits aren't atomic in means of time (or any other)
+	# so we use this heuristic and accept all commits with the
+	# same name and commit ID (if any, thank you CVS!) and author
+	# within 15 seconds before and after the commit we're 
+	# currently processing; if we have a hit we check the commit
+	# message to be 100% sure it's really the same commit;
+	for my $i (-15 .. 15)
+	{
+		my $tag = generate_commit_hash($epoch + $i, $infos->{'commitid'},
+									   $infos->{'author'});
+
+		if (exists $commits->{$tag})
+		{
+			# compare commit messages
+			if ($commits->{$tag}->{'comment'} eq (join("\n", @{$infos->{'comment'}})))
+			{
 				$commit_tag = $tag;
 				last;
 			}
 		}
 	}
-	if (!defined $commit_tag) {
-		$commit_tag = $commit_tags[5];	# yes, quite ugly :)
+
+	if (!defined $commit_tag)
+	{
+		# we need a new kenn^w commit tag
+		$commit_tag = generate_commit_hash($epoch, $infos->{'commitid'},
+										   $infos->{'author'});
 	}
 
-
-	if (!exists $commits->{$commit_tag}) {
-		$commits->{$commit_tag} = {
-			"date" => $infos->{'date'},
-			"time" => $infos->{'time'},
-			"author" => $infos->{'author'},
-			"commitid" => $infos->{'commitid'},
-			"comment" => join("\n", @{$infos->{'comment_lines'}})
+	if (!exists $commits->{$commit_tag})
+	{
+		$commits->{$commit_tag} =
+		{
+			'comment'  => join("\n", @{$infos->{'comment'}}),
+			'date'     => ctime($epoch),
 		};
+		#print "\rProcessed commit " . ++$$count;
 	}
-	unshift @{${$commits->{$commit_tag}}{'files'}}, {
-		"revision" => $infos->{'rev'},
-		"filename" => $filename
+
+	my $hash = 
+	{
+		'revision' => $infos->{'rev'},
+		'filename' => $filename,
 	};
+	$hash->{'tags'} = $infos->{'tags'} if $infos->{'tags'};
+	unshift @{${$commits->{$commit_tag}}{'files'}}, $hash;
+
+	# clear up info hash except for the filename
+	undef $$rinfos;
+	$$rinfos->{'filename'} = $filename;
 }
 
-sub extract_commits($$$%)
+################################################################################
+# parse_commit_log - parse the commit log obtained by executing <cmd> (read in #
+#                    chunks of 4096 bytes into an internal structure that will #
+#                    later on be used to generate git commits from; <prefix>   #
+#                    is removed from path strings and unless <ignore> is set,  #
+#                    unknown authors are complained about; results are stored  #
+#                    in $commits ref;                                          #
+# in:  cmd           command to execute for cvs log (e.g. a cat command)       #
+#      prefix        prefix to remove from cvs path                            #
+#      ignore        ignore unknown authors                                    #
+#      commits       hash ref to store results in                              #
+# out: number of commits                                                       #
+################################################################################
+sub parse_commit_log($$$%)
 {
-	my ($prefix, $cmd, $ignoreunknown, $commits) = @_;
-	my ($state, $current_file, $current_infos, $saved_line, $count, $buf, $rest);
+	my ($cmd, $prefix, $ignore, $commits) = @_;
+	my ($state, $infos, $tags, $count, $buf, $rest, %unknown_authors);
 
-	$state =  INITIAL;
+	$state = START;
 	$count = 0;
 	select(STDOUT);
 	$| = 1;
@@ -87,111 +204,162 @@ sub extract_commits($$$%)
 	$cmd .= " | ";
 	open C, $cmd;
 
-	while (read(C, $buf, 4096) or $rest) {
+	# this let's commit log contents stay within a page of memory;
+	# some commit logs I've seen were very large and blew up this
+	# little parser
+	while (read(C, $buf, 4096) or $rest)
+	{
 		$buf = "\n" if !defined $buf;
 		$buf = ($rest . $buf) if defined $rest;
 
-		while ($buf =~ s/(.*)\n//) {
+		while ($buf =~ s/(.*)\n//)
+		{
 			my $line = $1;
-			#print "Looking at: $line\n";
-			if ($state == INITIAL) {
-				if ($line =~ /^$/) {
-					$state = WAITING_FOR_RCS_FILE;
+
+			if ($state == INITIAL or $state == START)
+			{
+				if ($line =~ /^$/)
+				{
+					$state = RCS_FILE;
 					next;
-				} else {
+				}
+				elsif ($state == START and $line =~ /^\? /)
+				{
+					# untracked file, skip it
+					next;
+				}
+				else
+				{
 					die "Invalid input in state INITIAL: $line\n";
 				}
-			} elsif ($state == WAITING_FOR_RCS_FILE) {
-				if ($line =~ /RCS file: (.*?),v.*/) {
-					$current_file = $1;
-					$current_file =~ s|/Attic/|/|;
-					$current_file =~ s/\Q$prefix\E//o;
-					undef $current_infos;
-					$state = PROCESSING_RCS_FILE;
-					next;
-				} else {
-					die "Invalid input in state WAITING_FOR_RCS_FILE: $line\n";
-				}
-			} elsif ($state == PROCESSING_RCS_FILE) {
-				if ($line eq '----------------------------') {
-					$state = WAITING_FOR_REVISION;
-					$saved_line = $line;
-				}
-				next;
-			} elsif ($state == WAITING_FOR_REVISION) {
-				if ($line =~ /^revision (\S+)/) {
-
-					# is there a previous commit to store?
-					if (defined $current_infos) {
-						create_commit_object($commits, $current_file, $current_infos);
-						undef $current_infos;
+			}
+			elsif ($state == RCS_FILE)
+			{
+				if ($line =~ /RCS file: (.*?),v.*/)
+				{
+					undef $infos;
+					undef $tags;
+					$infos->{'filename'} = $1;
+					$infos->{'filename'} =~ s|/Attic/|/|;
+					if (defined $prefix and 0 == $infos->{'filename'} =~ s/\Q$prefix\E//o)
+					{
+						die "prefix '$prefix' not found in '$infos->{'filename'}"
 					}
-
-					$current_infos->{rev} = $1;
-					$state = WAITING_FOR_INFOS;
-					next;
-				} else {
-					# continue building the commit message
-					push @{$current_infos->{comment_lines}}, $saved_line;
-					push @{$current_infos->{comment_lines}}, $line;
-					$state = BUILDING_COMMIT_LOG;
+					$state = SKIP_TO_TAGS;
 					next;
 				}
-			} elsif ($state == WAITING_FOR_INFOS) {
-				if (exists $current_infos->{commitid}) {
-					die "Commit ID is already set";
+				else
+				{
+					die "Invalid input in state RCS_FILE: $line\n";
 				}
-				if ($line =~ /date: (\S+) (.*?);/) {
-					$current_infos->{date} = $1;
-					$current_infos->{time} = $2;
-				}
-				if ($line =~ /author: (.*?);/) {
-					die "unknown author '$1', please fix! ($current_file: $current_infos->{rev})" if (!defined $authors{$1} and !$ignoreunknown);
-					$current_infos->{author} = $1;
-				}
-				if ($line =~ /state: (.*?);/) {
-					$current_infos->{state} = $1;
-				}
-				if ($line =~ /commitid: (.*?);/) {
-					$current_infos->{commitid} = $1;
-				}
-				$state = WAITING_FOR_BRANCH_INFOS;
+			}
+			elsif ($state == SKIP_TO_TAGS)
+			{
+				$state = PROCESS_TAGS if ($line =~ /^symbolic names:/);
 				next;
-			} elsif ($state == WAITING_FOR_BRANCH_INFOS) {
-				if ($line =~ /^branches: /) {
-					$state = BUILDING_COMMIT_LOG;
-				} else {
+			}
+			elsif ($state == PROCESS_TAGS)
+			{
+				if ($line =~ /^\t(.+): ([0-9.]+)/)
+				{
+					my ($tag, $rev) = ($1, $2);
+					# ignore branches!
+					unshift @{$tags->{$rev}}, $tag if $rev =~ /[0-9]+\.[0-9]+/;
+				}
+				elsif ($line eq ('-' x 28))
+				{
+					$state = SKIP_TO_REVISION;
+				}
+				next;
+			}
+			elsif ($state == SKIP_TO_REVISION)
+			{
+				if ($line =~ /^revision (\S+)/)
+				{
+					$infos->{'rev'} = $1;
+					$infos->{'tags'} = $tags->{$1} if defined $tags->{$1};
+					$state = SKIP_TO_INFOS;
+				}
+				next;
+			}
+			elsif ($state == SKIP_TO_INFOS)
+			{
+				if ($line =~ /date: (\S+) (.*?);/)
+				{
+					$infos->{'epoch'} = str2time("$1 $2");
+				}
+
+				if ($line =~ /author: (.*?);/)
+				{
+					$unknown_authors{$1} = 1 if (!defined $authors{$1} and !$ignore);
+					$infos->{'author'} = $1;
+				}
+
+				$infos->{'state'} = $1 if ($line =~ /state: (.*?);/);
+				$infos->{'commitid'} = $1 if ($line =~ /commitid: (.*?);/);
+
+				$state = SKIP_TO_BRANCH_INFO;
+				next;
+			}
+			elsif ($state == SKIP_TO_BRANCH_INFO)
+			{
+				if ($line =~ /^branches: [0-9.]+;/)
+				{
+					$state = BUILD_COMMIT_LOG;
+				}
+				else
+				{
 					# message already belongs to commit message
-					$state = BUILDING_COMMIT_LOG;
-					push @{$current_infos->{comment_lines}}, $line;
+					push @{$infos->{'comment'}}, $line;
+					$state = BUILD_COMMIT_LOG;
 				}
+
 				next;
-			} elsif ($state == BUILDING_COMMIT_LOG) {
-				if ($line eq '----------------------------') {
-					# commit will be stored if the first revision if found after the separator
-					$state = WAITING_FOR_REVISION;
-				} elsif($line eq '=============================================================================') {
-	#				print "Found first revision for file\n";
-					if (exists $current_infos->{commitid} and $current_infos->{commitid} eq '<unknown>') {
-						die "Commit ID is already set to unknown";
-					}
-					create_commit_object($commits, $current_file, $current_infos);
-					undef $current_infos;
+			}
+			elsif ($state == BUILD_COMMIT_LOG)
+			{
+				if ($line eq ('-' x 28))
+				{
+					populate_commit_hash($commits, \$infos, \$count);
+					$state = SKIP_TO_REVISION;
+				}
+				elsif($line eq ('=' x 77))
+				{
+					# last revision for file
+					populate_commit_hash($commits, \$infos, \$count);
 					$state = INITIAL;
-					print "\rProcessed RCS file " .  ++$count;
-				} else {
-					push @{$current_infos->{comment_lines}}, $line;
+
+				}
+				else
+				{
+					# part of the commit message
+					push @{$infos->{'comment'}}, $line;
 				}
 				next;
 			}
 		}
 		$rest = $buf;
 	}
+
+	if (!$ignore && scalar keys %unknown_authors)
+	{
+		my @unknown_authors = keys %unknown_authors;
+		local $" = ",\n\t";
+
+		die "Unknown authors found:\n\t@unknown_authors,\nPlease fix!";
+	}
+
 	close C;
 	print "\n";
+
 	select(STDOUT);
 	$| = 0;
 	$count;
+}
+
+sub cd($)
+{
+	chdir $_[0] or die "Failed to change to directory '$_[0]': $!";
 }
 
 sub do_command($$) {
@@ -334,22 +502,27 @@ sub create_commits($$$$$) {
 	%commits = %{$r_commits};
 	$total = scalar keys %commits;
 
-	if ($end) {
+	if ($end)
+	{
 		warn "Processing $end of the $total total commits\n";
 		$total = $end
-	} else {
+	}
+	else
+	{
 		warn "Processing $total commits\n";
 	}
-	foreach my $commit (sort keys %commits) {
+
+	foreach my $commit (sort keys %commits)
+	{
 		my ($author, $mail, $commit_str, $headline, $comment, $epoch, $date, $env, $login, $do_commit);
 
-		$login = $commits{$commit}->{'author'};
-		($author, $mail) = (defined $authors{$login}) ? @{$authors{$login}} : ($login, "unknown");
+		$login = (split /_|||_/, $commit)[2];
+		($author, $mail) = (defined $authors{$login}) ?
+				@{$authors{$login}} : ($login, "unknown");
 
-		$epoch = str2time("$commits{$commit}->{'date'} $commits{$commit}->{'time'}");
+		$epoch = (split /_|||_/, $commit, 1)[0];
 		$date = ctime($epoch);
 		chomp $date;
-
 		$do_commit = $epoch > $squash_date;
 
 		if (!$do_commit) {
@@ -368,13 +541,13 @@ sub create_commits($$$$$) {
 					$commit_str .= "\t$filename: revision $revisions{$filename}\n";
 					cvs2git($filename, $revisions{$filename}, undef, $git_dir);
 				}
-				chdir $git_dir or die "Failed to chdir to '$git_dir': $!";
+				cd($git_dir);
 				do_command_no_output('git', 'add', '.');
 				print $commit_str;
 				write_file($temp_file, $commit_str);
 				do_command("$env git commit -F $temp_file", 1);
 				++$commits;
-				chdir $cvs_dir or die "Failed to chdir to '$cvs_dir': $!";
+				cd($cvs_dir);
 			}
 		}
 
@@ -448,7 +621,7 @@ sub create_commits($$$$$) {
 			$env = "GIT_COMMITTER_DATE=\"$date\" GIT_AUTHOR_DATE=\"$date\" GIT_AUTHOR_NAME=\"$author" .
 				   (($login ne $author) ? " ($login)" : "") .
 				   "\" GIT_AUTHOR_EMAIL=\"$mail\"";
-			chdir $git_dir or die "Failed to chdir to '$git_dir': $!";
+			cd($git_dir);
 			foreach my $a (@git_remove) {
 				if ($do_commit) {
 					do_command_no_output('git', 'rm', '-f', $a);
@@ -465,15 +638,16 @@ sub create_commits($$$$$) {
 			++$commits;
 		}
 		return $commits if $end && $i == $end;
-		chdir $cvs_dir or die "Failed to chdir to '$cvs_dir': $!";
+		cd($cvs_dir);
 	}
 	unlink($temp_file);
 	return $commits;
 }
 
-my ($cvs_dir, $git_dir, $max_commits, $squash_date, $ignoreunknown, $removeprefix, $finisher, $help, $args);
+my ($cvs_dir, $git_dir, $max_commits, $squash_date, $ignoreunknown, $removeprefix, $finisher, $help, $args, $component);
 
-eval {
+eval
+{
 	local $SIG{__WARN__} = sub { die "@_"; };
 
 	GetOptions(
@@ -486,112 +660,81 @@ eval {
 	'remove-prefix=s' => \$removeprefix,
 	'help'            => \$help);
 };
+
 chomp ($args = $@) if $@;
 
-if ($help) {
+if ($help)
+{
 	++$help;	# do nothing
-} elsif ($args) {
+}
+elsif ($args)
+{
 	warn "There were warnings/errors parings the command line: \n\t$args\n\n";
 	$help = 1;
-} elsif (!defined $cvs_dir or !defined $git_dir) {
+}
+elsif (!defined $cvs_dir or !defined $git_dir)
+{
 	warn "undefined ${\($cvs_dir ? 'git' : 'cvs' )}-dir, please fix!\n\n";
 	$help = 1;
-} elsif (defined $finisher and not -x $finisher) {
+}
+elsif (defined $finisher and not -x $finisher)
+{
 	warn "finisher script '$finisher' is not an executable file!\n\n";
 	$help = 1;
 }
-if ($help) {
-	die <<EOF;
-Usage: $0 --cvsdir <cvs_dir> --gitdir <git_dir>
-          [--maxcommits <max number of commits>]
-          [--squashdate <date up to which commits will be squashed>]
-          [--finisher <scriptlet>] [--remove-prefix <prefix>]
-          [--ignore-unknown] [--help]
 
-Convert CVS component in directory cvs-directory and store all commits
-in git_directory.
-
-cvs_directory is a working directory holding the component to convert
-and must be updated prior to running this script.
-
-git_directory must exist and a 'git init' must have been run. New
-commits will be appended to the current branch, so best create a new
-empty branch in the general case.
-
-optional parameter maxcommits can be set a positive value to indicate
-maximum number of commits to process.
-
-optional parameter squashdate can be set to a date to indicate that all
-files committed before that date will be squashed into in big commit.
-below is a list known to be understood by squashdate:
-	1995:01:24T09:08:17.1823213           ISO-8601
-	1995-01-24T09:08:17.1823213
-	Wed, 16 Jun 94 07:29:35 CST           Comma and day name are optional
-	Thu, 13 Oct 94 10:13:13 -0700
-	Wed, 9 Nov 1994 09:50:32 -0500 (EST)  Text in () will be ignored.
-	21 dec 17:05                          Will be parsed in the current time zone
-	21-dec 17:05
-	21/dec 17:05
-	21/dec/93 17:05
-	1999 10:02:18 "GMT"
-	16 Nov 94 22:28:20 PST
-
-the optional parameter finisher specifies a script run in gitdir, after
-the conversion process is (almost) finished; it can be used to issue
-filters etc; script is given cvsdir, gitdir and number of commits
-as command line arguments;
-
-the optional parameter ignore-unknown allows for unknown authors (i.e.
-those not included in authors hash to not cause this program to fail
-but to keep running modifying the commit message a little.
-
-the optional parameter remove-prefix is the prefix to be removed from
-path and defaults to '/export/sina/cvs/components/tgz/'
-
-EOF
+if ($help)
+{
+	help;
 }
+
 
 $squash_date = str2time($squash_date);
 
-my $component;
 $cvs_dir = rel2abs($cvs_dir);
-if ($cvs_dir =~ m|/components/tgz/*$|) {
+if ($cvs_dir =~ m|/components/tgz/*$|)
+{
     print "Converting toplevel\n";
-} elsif ($cvs_dir =~ m|/?([^/]+)/*$|) {
+}
+elsif ($cvs_dir =~ m|/?([^/]+)/*$|)
+{
 	$component = $1;
 	print "Converting component $component in directory $cvs_dir\n";
-} else {
+}
+else
+{
 	die "Unable to determine component from directory name $cvs_dir\n";
 }
 
 # Qualify $git_dir if needed
 $git_dir = rel2abs($git_dir);
 
-unless (-d $git_dir) {
+unless (-d $git_dir)
+{
 	die "Destination Git directory '$git_dir' not existing\n";
 }
 
-system('git', '--git-dir', "$git_dir/.git", 'rev-parse', '--is-inside-work-tree') == 0
+system('git', '--git-dir', "$git_dir/.git", 'rev-parse') == 0
   or die "Directory '$git_dir' is no Git working directory\n";
 
-chdir $cvs_dir
-  or die "Failed to change to directory '$cvs_dir': $!";
+cd($cvs_dir);
 
 my (%commits, $commits);
 my $prefix = $removeprefix ? $removeprefix : '/export/sina/cvs/components/tgz/';
-if (defined $component) {
-	$prefix =~ s/\/$//g;
+
+if (defined $component)
+{
+	$prefix =~ s|/$||g;
     $prefix .= "/$component/";
 }
 
-#extract_commits($prefix, 'cvs log -r1 2>/dev/null', $ignoreunknown, \%commits);
-extract_commits($prefix, 'cat ../cvslog', $ignoreunknown, \%commits);
+#parse_commit_log('cvs log -r1 2>/dev/null', $prefix, $ignoreunknown, \%commits);
+#parse_commit_log('cat lcdproc.cvslog', $prefix, $ignoreunknown, \%commits);
+parse_commit_log('cat lcdproc.cvslog', '/cvsroot/lcdproc/lcdproc/', 1, \%commits);
 #print Data::Dumper->Dump([\%commits], [qw(foo)]);
-#exit;
 $commits = create_commits(\%commits, $cvs_dir, $git_dir, $max_commits, $squash_date ? $squash_date : 0);
 
-if ($finisher) {
-	chdir $git_dir
-		or die "Failed to change to directory '$cvs_dir': $!";
+if ($finisher)
+{
 	system("$finisher", "$cvs_dir", "$git_dir", "$commits");
 }
