@@ -104,6 +104,16 @@ sub generate_commit_hash($$$)
 	sprintf('%010d', $epoch) . '_|||_' .  $commitid . '_|||_' . $author;
 }
 
+sub build_env_string($$$;$)
+{
+	my ($date, $author, $mail, $cdate) = @_;
+
+	"GIT_AUTHOR_DATE='$date' " .
+	"GIT_AUTHOR_NAME='$author' " .
+	"GIT_AUTHOR_EMAIL='$mail' " .
+	"GIT_COMMITTER_DATE='${\(defined $cdate ? $cdate : $date)}'";
+}
+
 ################################################################################
 # populate_commit_hash - looks for a suitable entry in <commits> and inserts   #
 #                        the pushes file info contained in <rinfos> into this  #
@@ -157,21 +167,26 @@ sub populate_commit_hash(%$$)
 
 	if (!exists $commits->{$commit_tag})
 	{
+		# TODO remove, it's redundant and for debugging only
+		my $date = ctime($epoch);
+		chomp $date;
 		$commits->{$commit_tag} =
 		{
 			'comment'  => join("\n", @{$infos->{'comment'}}),
-			'date'     => ctime($epoch),
+			'date'     => $date,
 		};
+		# all files of a particular commit have the same tags
+		$commits->{$commit_tag}->{'tags'} = $infos->{'tags'} if $infos->{'tags'};
+
+		# TODO re-enable this
 		#print "\rProcessed commit " . ++$$count;
 	}
 
-	my $hash = 
+	unshift @{${$commits->{$commit_tag}}{'files'}},
 	{
 		'revision' => $infos->{'rev'},
 		'filename' => $filename,
 	};
-	$hash->{'tags'} = $infos->{'tags'} if $infos->{'tags'};
-	unshift @{${$commits->{$commit_tag}}{'files'}}, $hash;
 
 	# clear up info hash except for the filename
 	undef $$rinfos;
@@ -357,14 +372,18 @@ sub parse_commit_log($$$%)
 	$count;
 }
 
+################################################################################
+# cd - change into directory - dies on failure                                 #
+# in:  directory to cd in                                                      #
+################################################################################
 sub cd($)
 {
 	chdir $_[0] or die "Failed to change to directory '$_[0]': $!";
 }
 
-sub do_command($$) {
+sub do_command($$)
+{
 	my ($cmd, $debug) = @_;
-
 	print "$cmd\n" if $debug;
 	`$cmd`;
 }
@@ -372,61 +391,73 @@ sub do_command($$) {
 sub do_command_no_output
 {
 	print "@_\n";
-	system(@_) == 0
-	  or warn "Failed to run command: $?";
+	system(@_) == 0 or warn "Failed to run command: $?";
 }
 
 # Parameters: filename => , command =>
-sub do_command_with_redirect
+sub do_command_with_redirect(%)
 {
     my %params = @_;
-    my $filename = $params{filename}
-      or die "Missing filename parameter";
-    my $command = $params{command}
-      or die "Missing commmand parameter";
+    my $filename = $params{filename} or die "Missing filename parameter";
+    my $command = $params{command} or die "Missing commmand parameter";
+    my $file = IO::File->new($filename, 'w') or die "Failed to write to file: $!";
+
     print "@$command -> $filename\n" if $params{debug};
-    my $file = IO::File->new($filename, 'w')
-      or die "Failed to write to file: $!";
+
     my $pid = fork();
-    if ($pid == 0) {
-	dup2(fileno($file), 1);
-	exec (@$command);
-	die "cmd failed";
-    } elsif ($pid > 0) {
-	waitpid($pid, 0);
-	if ($? != 0) {
-	    #die "Command returned error code $pid\n";
-		return 1;
-	}
-	$file->close;
-    } else {
-	die "Fork failed with: $!";
+    if ($pid == 0)
+	{
+		dup2(fileno($file), 1);
+		exec (@$command);
+		die "cmd failed";
+    }
+	elsif ($pid > 0)
+	{
+		waitpid($pid, 0);
+		if ($? != 0)
+		{
+			# TODO catch errors about anon cvs user here!
+		die "Command returned error code $pid\n";
+			#return 1;
+		}
+		$file->close;
+    }
+	else
+	{
+		die "Fork failed with: $!";
     }
 
 	return 0;
 }
 
-sub write_file($$) {
+################################################################################
+# write_file - write given <content> into file                                 #
+# in:  file to write to                                                        #
+#      contents to write to file                                               #
+################################################################################
+sub write_file($$)
+{
 	my ($file, $content) = @_;
 	open FILE, ">$file";
 	print FILE $content;
 	close FILE;
 }
 
-sub convert_charset
+################################################################################
+# convert_charset - convert charset from latin1 to utf-8                       #
+#                   NOTE: had to shorten this sub like this, feels good though #
+# in:  string to convert                                                       #
+# out: converted string                                                        #
+################################################################################
+sub convert_charset($)
 {
-	my $comment = shift;
-
-	# Check if contents is uft8
-	my $result = $comment;
-	eval {
-		decode('utf-8', $comment, Encode::FB_CROAK);
+	eval
+	{
+		# Check if contents is uft8
+		decode('utf-8', $_[0], Encode::FB_CROAK);
 	};
-	if ($@) {
-		my $string = decode('latin1', $comment);
-		$result = encode('utf-8', $string);
-	}
-	return $result;
+
+	$@ ? encode('utf-8', decode('latin1', $_[0])) : $_[0]
 }
 
 sub trim_comment($) {
@@ -435,7 +466,10 @@ sub trim_comment($) {
 	$ret = "";
 	$count = $line = 0;
 
-	foreach my $s (split /\n/, $comment) {
+	$comment = convert_charset($comment);
+
+	foreach my $s (split /\n/, $comment)
+	{
 		my (@words, $words, $len);
 
 		$s =~ s/^\s+//;
@@ -449,25 +483,35 @@ sub trim_comment($) {
 		$words = scalar @words;
 		$len = $words ? length($words[0]) : 0;
 
-		if ((2 <= $words or ($len > 9 and $s !~ /:$/)) and !length $ret) {
+		if ((2 <= $words or ($len > 9 and $s !~ /:$/)) and !length $ret)
+		{
 			($ret = $s) =~ s/^\s//g;
-		} elsif (length $ret) {
+		}
+		elsif (length $ret)
+		{
 			++$count if 1 <= $words;
 			last;
 		}
 		++$line;
 	}
-	if (length($ret) > 50) {
+
+	if (length($ret) > 50)
+	{
 	    $ret = substr($ret, 0, 47);
 	    # remove any start of a german utf-8 character
 	    $ret =~ s/\xC3$//;
 	    $ret .= "...";
-	} elsif ($count) {
+	}
+	elsif ($count)
+	{
 		$ret =~ s/\s*$/.../;
 	}
+
 	$ret = $comment if !length $ret;
 	$ret =~ s/ \.\.\.$/.../;
 
+	$ret = (" " x 4) . $ret;
+	$ret =~ s/\n/$& . (" " x 4)/eg;
 	"$ret\n";
 }
 
@@ -478,17 +522,17 @@ sub cvs2git($$$$) {
 	mkpath(dirname($destination_file));
 
 	my $ret;
-	do {
-		$ret = do_command_with_redirect(filename => $destination_file,
-			debug => 1,
-			command => ['cvs', 'update', '-p',
-				'-r', $revision,
-				$filename]);
+	do
+	{
+		$ret = do_command_with_redirect(
+				filename => $destination_file,
+				debug    => 1,
+				command  => ['cvs', 'update', '-p', '-r', $revision, $filename]);
 	} while ($ret == 1);
 
-	if (defined $mode) {
-		chmod $mode, $destination_file
-			or die "Failed to chmod file '$destination_file': $!";
+	if (defined $mode)
+	{
+		chmod $mode, $destination_file or die "Failed to chmod file '$destination_file': $!";
 	}
 }
 
@@ -519,25 +563,36 @@ sub create_commits($$$$$) {
 		$login = (split /_|||_/, $commit)[2];
 		($author, $mail) = (defined $authors{$login}) ?
 				@{$authors{$login}} : ($login, "unknown");
+		$author .= " ($login)" unless $author eq $login;
 
 		$epoch = (split /_|||_/, $commit, 1)[0];
 		$date = ctime($epoch);
 		chomp $date;
 		$do_commit = $epoch > $squash_date;
 
-		if (!$do_commit) {
+		if (!$do_commit)
+		{
 			warn "Skipping commit ${\(++$i)}/$total\n";
 			$start_date = $date if (!defined $start_date);
 			$end_date = $date;
 			++$squashed;
-		} else {
+		}
+		else
+		{
 			warn "Processing commit ${\(++$i)}/$total\n";
-			if ($squashed) {
-				$commit_str = "CVS import: Initial squash-commit\n\nThis commit squashes $squashed commits starting from\n$start_date and ending $end_date\ninto a single commit to simplify git history.\n\nfiles\n";
+			if ($squashed)
+			{
+				$commit_str = "CVS import: Initial squash-commit\n\n" .
+					"This commit squashes $squashed commits starting from\n" .
+					"$start_date and ending $end_date\n" .
+					"into a single commit to simplify git history.\n\nfiles\n";
 				$squashed = 0;
-				$env = "GIT_COMMITTER_DATE=\"$end_date\" GIT_AUTHOR_DATE=\"$end_date\" GIT_AUTHOR_NAME=\"Cvs T. Git (cvs2git.pl)\" GIT_AUTHOR_EMAIL=\"hakke_007@gmx.de\"";
+				$env = build_env_string($end_date,
+										"Cvs T. Git (cvs2git.pl)",
+										'hakke_007@gmx.de');
 
-				foreach my $filename (sort (keys %revisions)) {
+				foreach my $filename (sort (keys %revisions))
+				{
 					$commit_str .= "\t$filename: revision $revisions{$filename}\n";
 					cvs2git($filename, $revisions{$filename}, undef, $git_dir);
 				}
@@ -552,13 +607,9 @@ sub create_commits($$$$$) {
 		}
 
 		$comment = $commits{$commit}->{'comment'};
-		$comment = convert_charset($comment);
 		$headline = trim_comment($comment);
-		$comment = (" " x 4). $comment;
-		$comment =~ s/\n/$& . (" " x 4)/eg;
 
 		$commit_str = "$headline\nCVS import: $author" .
-					  (($login ne $author) ? " ($login)" : "") .
 					  ", $date\n\noriginal comment:\n$comment\n\nfiles:\n";
 		my @git_remove;
 		my %commit_str;
@@ -618,12 +669,12 @@ sub create_commits($$$$$) {
 		}
 
 		if ($do_commit) {
-			$env = "GIT_COMMITTER_DATE=\"$date\" GIT_AUTHOR_DATE=\"$date\" GIT_AUTHOR_NAME=\"$author" .
-				   (($login ne $author) ? " ($login)" : "") .
-				   "\" GIT_AUTHOR_EMAIL=\"$mail\"";
+			$env = build_env_string($date, $author, $mail);
 			cd($git_dir);
-			foreach my $a (@git_remove) {
-				if ($do_commit) {
+			foreach my $a (@git_remove)
+			{
+				if ($do_commit)
+				{
 					do_command_no_output('git', 'rm', '-f', $a);
 				}
 			}
@@ -644,97 +695,96 @@ sub create_commits($$$$$) {
 	return $commits;
 }
 
-my ($cvs_dir, $git_dir, $max_commits, $squash_date, $ignoreunknown, $removeprefix, $finisher, $help, $args, $component);
-
-eval
+sub main()
 {
-	local $SIG{__WARN__} = sub { die "@_"; };
+	my ($cvs_dir, $git_dir, $max_commits, $squash_date, $ignoreunknown, $removeprefix, $finisher, $help, $args, $component);
 
-	GetOptions(
-	'cvsdir=s'        => \$cvs_dir,
-	'gitdir=s'        => \$git_dir,
-	'maxcommits=i'    => \$max_commits,
-	'squashdate=s'    => \$squash_date,
-	'finisher=s'      => \$finisher,
-	'ignore-unknown'  => \$ignoreunknown,
-	'remove-prefix=s' => \$removeprefix,
-	'help'            => \$help);
-};
+	eval
+	{
+		local $SIG{__WARN__} = sub { die "@_"; };
 
-chomp ($args = $@) if $@;
+		GetOptions(
+				'cvsdir=s'        => \$cvs_dir,
+				'gitdir=s'        => \$git_dir,
+				'maxcommits=i'    => \$max_commits,
+				'squashdate=s'    => \$squash_date,
+				'finisher=s'      => \$finisher,
+				'ignore-unknown'  => \$ignoreunknown,
+				'remove-prefix=s' => \$removeprefix,
+				'help'            => \$help);
+	};
 
-if ($help)
-{
-	++$help;	# do nothing
+	chomp ($args = $@) if $@;
+
+	if ($args)
+	{
+		warn "There were warnings/errors parsing the command line:\n" .
+			 "\t$args\n\n";
+		++$help;
+	}
+	elsif (!defined $cvs_dir or !defined $git_dir)
+	{
+		warn "undefined ${\($cvs_dir ? 'git' : 'cvs' )}-dir, please fix!\n\n";
+		++$help;
+	}
+	elsif (defined $finisher and not -x $finisher)
+	{
+		warn "finisher script '$finisher' is not an executable file!\n\n";
+		++$help;
+	}
+
+	help() if $help;
+
+	$squash_date = str2time($squash_date);
+
+	$cvs_dir = rel2abs($cvs_dir);
+	if ($cvs_dir =~ m|/components/tgz/*$|)
+	{
+	    print "Converting toplevel\n";
+	}
+	elsif ($cvs_dir =~ m|/?([^/]+)/*$|)
+	{
+		$component = $1;
+		print "Converting component $component in directory $cvs_dir\n";
+	}
+	else
+	{
+		die "Unable to determine component from directory name $cvs_dir\n";
+	}
+
+	# Qualify $git_dir if needed
+	$git_dir = rel2abs($git_dir);
+
+	unless (-d $git_dir)
+	{
+		die "Destination Git directory '$git_dir' not existing\n";
+	}
+
+	system('git', '--git-dir', "$git_dir/.git", 'rev-parse') == 0
+	  or die "Directory '$git_dir' is no Git working directory\n";
+
+	cd($cvs_dir);
+
+	my (%commits, $commits);
+	my $prefix = $removeprefix ? $removeprefix : '/export/sina/cvs/components/tgz/';
+
+	if (defined $component)
+	{
+		$prefix =~ s|/$||g;
+	    $prefix .= "/$component/";
+	}
+
+	#parse_commit_log('cvs log -r1 2>/dev/null', $prefix, $ignoreunknown, \%commits);
+	#parse_commit_log('cat lcdproc.cvslog', $prefix, $ignoreunknown, \%commits);
+	parse_commit_log('cat lcdproc.cvslog', '/cvsroot/lcdproc/lcdproc/', $ignoreunknown, \%commits);
+	print Data::Dumper->Dump([\%commits], [qw(foo)]);
+	exit;
+	$commits = create_commits(\%commits, $cvs_dir, $git_dir, $max_commits, $squash_date ? $squash_date : 0);
+
+	if ($finisher)
+	{
+		system("$finisher", "$cvs_dir", "$git_dir", "$commits");
+	}
 }
-elsif ($args)
-{
-	warn "There were warnings/errors parings the command line: \n\t$args\n\n";
-	$help = 1;
-}
-elsif (!defined $cvs_dir or !defined $git_dir)
-{
-	warn "undefined ${\($cvs_dir ? 'git' : 'cvs' )}-dir, please fix!\n\n";
-	$help = 1;
-}
-elsif (defined $finisher and not -x $finisher)
-{
-	warn "finisher script '$finisher' is not an executable file!\n\n";
-	$help = 1;
-}
 
-if ($help)
-{
-	help;
-}
-
-
-$squash_date = str2time($squash_date);
-
-$cvs_dir = rel2abs($cvs_dir);
-if ($cvs_dir =~ m|/components/tgz/*$|)
-{
-    print "Converting toplevel\n";
-}
-elsif ($cvs_dir =~ m|/?([^/]+)/*$|)
-{
-	$component = $1;
-	print "Converting component $component in directory $cvs_dir\n";
-}
-else
-{
-	die "Unable to determine component from directory name $cvs_dir\n";
-}
-
-# Qualify $git_dir if needed
-$git_dir = rel2abs($git_dir);
-
-unless (-d $git_dir)
-{
-	die "Destination Git directory '$git_dir' not existing\n";
-}
-
-system('git', '--git-dir', "$git_dir/.git", 'rev-parse') == 0
-  or die "Directory '$git_dir' is no Git working directory\n";
-
-cd($cvs_dir);
-
-my (%commits, $commits);
-my $prefix = $removeprefix ? $removeprefix : '/export/sina/cvs/components/tgz/';
-
-if (defined $component)
-{
-	$prefix =~ s|/$||g;
-    $prefix .= "/$component/";
-}
-
-#parse_commit_log('cvs log -r1 2>/dev/null', $prefix, $ignoreunknown, \%commits);
-#parse_commit_log('cat lcdproc.cvslog', $prefix, $ignoreunknown, \%commits);
-parse_commit_log('cat lcdproc.cvslog', '/cvsroot/lcdproc/lcdproc/', 1, \%commits);
-#print Data::Dumper->Dump([\%commits], [qw(foo)]);
-$commits = create_commits(\%commits, $cvs_dir, $git_dir, $max_commits, $squash_date ? $squash_date : 0);
-
-if ($finisher)
-{
-	system("$finisher", "$cvs_dir", "$git_dir", "$commits");
-}
+main();
