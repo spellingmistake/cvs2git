@@ -22,16 +22,6 @@ my %authors = (
 	'wasi'      => [ 'Thomas Egerer',      'thomas.washeim@gmx.net' ],
 );
 
-sub START() { return 0; }
-sub INITIAL() { return 1; }
-sub RCS_FILE() { return 2; }
-sub SKIP_TO_TAGS() { return 3; }
-sub PROCESS_TAGS() { return 4; }
-sub SKIP_TO_REVISION() { return 5; }
-sub SKIP_TO_INFOS() { return 6; }
-sub SKIP_TO_BRANCH_INFO() { return 7; }
-sub BUILD_COMMIT_LOG() { return 8; }
-
 sub help()
 {
 	die <<EOF;
@@ -39,7 +29,7 @@ Usage: $0 --cvsdir <cvs_dir> --gitdir <git_dir>
           [--maxcommits <max number of commits>]
           [--squashdate <date up to which commits will be squashed>]
           [--finisher <scriptlet>] [--remove-prefix <prefix>]
-          [--ignore-unknown] [--help]
+          [--allow-unknown] [--help]
 
 Convert CVS component in directory cvs-directory and store all commits
 in git_directory.
@@ -74,7 +64,7 @@ the conversion process is (almost) finished; it can be used to issue
 filters etc; script is given cvsdir, gitdir and number of commits
 as command line arguments;
 
-the optional parameter ignore-unknown allows for unknown authors (i.e.
+the optional parameter allow-unknown allows for unknown authors (i.e.
 those not included in authors hash to not cause this program to fail
 but to keep running modifying the commit message a little.
 
@@ -104,6 +94,15 @@ sub generate_commit_hash($$$)
 	sprintf('%010d', $epoch) . '_|||_' .  $commitid . '_|||_' . $author;
 }
 
+################################################################################
+# build_env_string - build environemnt for git to accept author date and mail  #
+#                    for a commit                                              #
+# in:  date - date to use for author date value                                #
+#      author - author to use with commit                                      #
+#      mail - mail address of the author                                       #
+#      cdate - commit date to use with commit (defaults to date if omited)     #
+# out: environemnt string to use with git commit                               #
+################################################################################
 sub build_env_string($$$;$)
 {
 	my ($date, $author, $mail, $cdate) = @_;
@@ -128,6 +127,8 @@ sub populate_commit_hash(%$$)
 {
 	my ($commits, $rinfos, $count) = @_;
 	my (@commit_tags, $commit_tag, $epoch, $filename);
+
+	return  if $$rinfos->{'rev'} !~ /^[0-9]+\.[0-9]+$/;
 
 	my $infos = $$rinfos;
 	$infos->{'rev'} = 'dead' if ($infos->{'state'} eq 'dead');
@@ -193,22 +194,32 @@ sub populate_commit_hash(%$$)
 	$$rinfos->{'filename'} = $filename;
 }
 
+sub START() { return 0; }
+sub INITIAL() { return 1; }
+sub RCS_FILE() { return 2; }
+sub SKIP_TO_TAGS() { return 3; }
+sub PROCESS_TAGS() { return 4; }
+sub SKIP_TO_REVISION() { return 5; }
+sub SKIP_TO_INFOS() { return 6; }
+sub SKIP_TO_BRANCH_INFO() { return 7; }
+sub BUILD_COMMIT_LOG() { return 8; }
+
 ################################################################################
 # parse_commit_log - parse the commit log obtained by executing <cmd> (read in #
 #                    chunks of 4096 bytes into an internal structure that will #
 #                    later on be used to generate git commits from; <prefix>   #
-#                    is removed from path strings and unless <ignore> is set,  #
+#                    is removed from path strings and unless <allow> is set,   #
 #                    unknown authors are complained about; results are stored  #
 #                    in $commits ref;                                          #
 # in:  cmd           command to execute for cvs log (e.g. a cat command)       #
 #      prefix        prefix to remove from cvs path                            #
-#      ignore        ignore unknown authors                                    #
+#      allow         allow unknown authors                                     #
 #      commits       hash ref to store results in                              #
 # out: number of commits                                                       #
 ################################################################################
 sub parse_commit_log($$$%)
 {
-	my ($cmd, $prefix, $ignore, $commits) = @_;
+	my ($cmd, $prefix, $allow, $commits) = @_;
 	my ($state, $infos, $tags, $count, $buf, $rest, %unknown_authors);
 
 	$state = START;
@@ -306,7 +317,7 @@ sub parse_commit_log($$$%)
 
 				if ($line =~ /author: (.*?);/)
 				{
-					$unknown_authors{$1} = 1 if (!defined $authors{$1} and !$ignore);
+					$unknown_authors{$1} = 1 if (!defined $authors{$1} and !$allow);
 					$infos->{'author'} = $1;
 				}
 
@@ -318,7 +329,7 @@ sub parse_commit_log($$$%)
 			}
 			elsif ($state == SKIP_TO_BRANCH_INFO)
 			{
-				if ($line =~ /^branches: [0-9.]+;/)
+				if ($line =~ /^branches:  [0-9.]+;/)
 				{
 					$state = BUILD_COMMIT_LOG;
 				}
@@ -356,7 +367,7 @@ sub parse_commit_log($$$%)
 		$rest = $buf;
 	}
 
-	if (!$ignore && scalar keys %unknown_authors)
+	if (!$allow && scalar keys %unknown_authors)
 	{
 		my @unknown_authors = keys %unknown_authors;
 		local $" = ",\n\t";
@@ -383,49 +394,54 @@ sub cd($)
 
 sub do_command($$)
 {
+	# TODO: re-enable
 	my ($cmd, $debug) = @_;
-	print "$cmd\n" if $debug;
-	`$cmd`;
+	#print "$cmd\n";
+	#print "$cmd\n" if $debug;
+	#`$cmd`;
 }
 
 sub do_command_no_output
 {
-	print "@_\n";
-	system(@_) == 0 or warn "Failed to run command: $?";
+	# TODO: re-enable
+	#print "@_\n";
+	#system(@_) == 0 or warn "Failed to run command: $?";
 }
 
 # Parameters: filename => , command =>
 sub do_command_with_redirect(%)
 {
+	# TODO: re-enable
     my %params = @_;
-    my $filename = $params{filename} or die "Missing filename parameter";
-    my $command = $params{command} or die "Missing commmand parameter";
-    my $file = IO::File->new($filename, 'w') or die "Failed to write to file: $!";
+	#print "@{$params{'command'}}\n";
+    #my $filename = $params{filename} or die "Missing filename parameter";
+    #my $command = $params{command} or die "Missing commmand parameter";
+    #my $file = IO::File->new($filename, 'w') or die "Failed to write to file: $!";
 
-    print "@$command -> $filename\n" if $params{debug};
+    #print "@$command -> $filename\n" if $params{debug};
 
-    my $pid = fork();
-    if ($pid == 0)
-	{
-		dup2(fileno($file), 1);
-		exec (@$command);
-		die "cmd failed";
-    }
-	elsif ($pid > 0)
-	{
-		waitpid($pid, 0);
-		if ($? != 0)
-		{
-			# TODO catch errors about anon cvs user here!
-		die "Command returned error code $pid\n";
-			#return 1;
-		}
-		$file->close;
-    }
-	else
-	{
-		die "Fork failed with: $!";
-    }
+    #my $pid = fork();
+    #if ($pid == 0)
+	#{
+	#	dup2(fileno($file), 1);
+	#	exec (@$command);
+	#	die "cmd failed";
+    #}
+	#elsif ($pid > 0)
+	#{
+	#	waitpid($pid, 0);
+	#	if ($? != 0)
+	#	{
+	#		# TODO catch errors about anon cvs user here!
+	#	die "Command returned error code $pid\n";
+	#		#return 1;
+	#	}
+	#	$file->close;
+    #}
+	#else
+	#{
+	#	die "Fork failed with: $!";
+    #}
 
 	return 0;
 }
@@ -451,67 +467,79 @@ sub write_file($$)
 ################################################################################
 sub convert_charset($)
 {
+	my $comment = $_[0];
 	eval
 	{
 		# Check if contents is uft8
 		decode('utf-8', $_[0], Encode::FB_CROAK);
 	};
 
-	$@ ? encode('utf-8', decode('latin1', $_[0])) : $_[0]
+	$@ ? encode('utf-8', decode('latin1', $comment)) : $comment;
 }
 
-sub trim_comment($) {
-	my $comment = shift;
-	my ($ret, $count, $line);
-	$ret = "";
-	$count = $line = 0;
+################################################################################
+# trim_comment - make first commit line for git look good; since git is        #
+#                superiour to CVS in many ways a commit line displayed with    #
+#                --oneline option should not exceed the 80 chars limit;        #
+#                this is essentially what this function does; somehow the      #
+#                commits that I've had the honor to convert with it kinda did  #
+#                every crap one can possible think of (me included, though I   #
+#                have been at least consistent in the crap I did);             #
+#                took me quite some time to finally figure out what I had      #
+#                planned with every single line in the first place, seemed to  #
+#                make sense by the time writing it; note to self: use comments #
+#                next time!                                                    #
+# in:  possible crappy comment                                                 #
+# out: somehow not so crappy headline of the new git commit                    #
+################################################################################
+sub trim_comment($)
+{
+	my $comment = $_[0];
+	my ($ret, $line);
+	$line = 0;
 
 	$comment = convert_charset($comment);
-
 	foreach my $s (split /\n/, $comment)
 	{
-		my (@words, $words, $len);
+		my ($words, $len);
 
+		# leading white spaces
 		$s =~ s/^\s+//;
+		# leading dot-like stuff once, or even twice
 		$s =~ s/^[-+_o*]{1,2}\s?(\w|\"|\')/$1/g;
-		$s =~ s/^.{1,10}:\s*// if !$line;
-		$s =~ s/^\[.*?\]// if !$line;
-		# some crazy folks use o for bullets :$
-		#$s =~ s/^[o_] //;
 
-		@words = split /\s/, $s;
-		$words = scalar @words;
+		$words = scalar(my @words = split /\s/, $s);
 		$len = $words ? length($words[0]) : 0;
 
-		if ((2 <= $words or ($len > 9 and $s !~ /:$/)) and !length $ret)
+		# we accept it as valid comment iff
+		# - it has at least two words, or
+		# - the first word is > 9 characters and comment line does not end
+		#   with a colon(oscopie)
+		if ((2 <= $words or ($len > 9 and $s !~ /:$/)) and !defined $ret)
 		{
 			($ret = $s) =~ s/^\s//g;
 		}
-		elsif (length $ret)
+		elsif (defined $ret)
 		{
-			++$count if 1 <= $words;
+			# indicate that comment continues
+			$ret =~ s/\s*$/.../;
 			last;
 		}
 		++$line;
 	}
 
+	# fall back to single comment line
+	$ret = $comment if !defined $ret;
+
+	# limit lenght of line to 50 chars tops
 	if (length($ret) > 50)
 	{
 	    $ret = substr($ret, 0, 47);
 	    # remove any start of a german utf-8 character
 	    $ret =~ s/\xC3$//;
-	    $ret .= "...";
-	}
-	elsif ($count)
-	{
 		$ret =~ s/\s*$/.../;
 	}
 
-	$ret = $comment if !length $ret;
-	$ret =~ s/ \.\.\.$/.../;
-
-	$ret = (" " x 4) . $ret;
-	$ret =~ s/\n/$& . (" " x 4)/eg;
 	"$ret\n";
 }
 
@@ -532,19 +560,20 @@ sub cvs2git($$$$) {
 
 	if (defined $mode)
 	{
-		chmod $mode, $destination_file or die "Failed to chmod file '$destination_file': $!";
+		# TODO re-enable
+		#chmod $mode, $destination_file or die "Failed to chmod file '$destination_file': $!";
 	}
 }
 
-sub create_commits($$$$$) {
-	my ($r_commits, $cvs_dir, $git_dir, $end, $squash_date) = @_;
-	my (%revisions, %commits, $total, $i, $commits, $start_date, $end_date, $squashed);
+sub create_commits($$$$%)
+{
+	my ($commits, $cvs_dir, $git_dir, $end, $squash_date) = @_;
+	my (%revisions, $total, $i, $count, $start_date, $end_date, $squashed);
 	my (undef, $temp_file) = tempfile();
 	$squashed = 0;
 
-	$commits = $i = 0;
-	%commits = %{$r_commits};
-	$total = scalar keys %commits;
+	$count = $i = 0;
+	$total = scalar keys %{$commits};
 
 	if ($end)
 	{
@@ -556,16 +585,18 @@ sub create_commits($$$$$) {
 		warn "Processing $total commits\n";
 	}
 
-	foreach my $commit (sort keys %commits)
+	foreach my $commit (sort keys %{$commits})
 	{
 		my ($author, $mail, $commit_str, $headline, $comment, $epoch, $date, $env, $login, $do_commit);
 
-		$login = (split /_|||_/, $commit)[2];
+		die "no files: $commit" if 0 == (scalar @{${$commits->{$commit}}{"files"}});
+
+		$login = (split /\Q_|||_\E/, $commit)[2];
 		($author, $mail) = (defined $authors{$login}) ?
 				@{$authors{$login}} : ($login, "unknown");
 		$author .= " ($login)" unless $author eq $login;
 
-		$epoch = (split /_|||_/, $commit, 1)[0];
+		$epoch = (split /\Q_|||_\E/, $commit, 2)[0];
 		$date = ctime($epoch);
 		chomp $date;
 		$do_commit = $epoch > $squash_date;
@@ -585,7 +616,7 @@ sub create_commits($$$$$) {
 				$commit_str = "CVS import: Initial squash-commit\n\n" .
 					"This commit squashes $squashed commits starting from\n" .
 					"$start_date and ending $end_date\n" .
-					"into a single commit to simplify git history.\n\nfiles\n";
+					"into a single commit to simplify git history.\n\nfiles:\n";
 				$squashed = 0;
 				$env = build_env_string($end_date,
 										"Cvs T. Git (cvs2git.pl)",
@@ -601,19 +632,21 @@ sub create_commits($$$$$) {
 				print $commit_str;
 				write_file($temp_file, $commit_str);
 				do_command("$env git commit -F $temp_file", 1);
-				++$commits;
+				++$count;
 				cd($cvs_dir);
 			}
 		}
 
-		$comment = $commits{$commit}->{'comment'};
+		$comment = $commits->{$commit}->{'comment'};
 		$headline = trim_comment($comment);
+		$comment = (" " x 4). $comment;
+		$comment =~ s/\n/$& . (" " x 4)/eg;
 
 		$commit_str = "$headline\nCVS import: $author" .
 					  ", $date\n\noriginal comment:\n$comment\n\nfiles:\n";
 		my @git_remove;
 		my %commit_str;
-		foreach my $file (sort @{${$commits{$commit}}{"files"}}) {
+		foreach my $file (sort @{${$commits->{$commit}}{"files"}}) {
 			my ($revision, $filename, $prev_revision, $tmp);
 			my $file_mode;
 
@@ -681,37 +714,49 @@ sub create_commits($$$$$) {
 
 			do_command_no_output('git', 'add', '.');
 			# commit changes
-			print $commit_str;
+			#print "$commit_str\n------\n";
 			write_file($temp_file, $commit_str);
 			do_command("$env git commit -F $temp_file", 1);
 			# unlink temporary files
 			#unlink "msg", "patch.diff";
-			++$commits;
+			++$count;
 		}
-		return $commits if $end && $i == $end;
+		return $count if $end && $i == $end;
 		cd($cvs_dir);
 	}
 	unlink($temp_file);
-	return $commits;
+	return $count;
 }
 
-sub main()
+################################################################################
+# parse_opts - parse opts and perform various sanity checks, dies on failure   #
+# out: option array containing programs options:                               #
+#      - cvsdir - CVS directory, must exist and contain a CVS subdir           #
+#      - gitdir - git destination directory, will be created if non-existent   #
+#      - maxcommits - maximum number of commits (optional)                     #
+#      - squashdate - date to which all commits will be squashed (optional)    #
+#      - finisher - finisher script to run after completion of conversion is   #
+#                   complete e.g. git-filter-branch (optional)                 #
+#      - allowunknown - do not abort if unknown authors were found (optional)  #
+#      - removeprefix - prefix to cut from files parsed in CVS log (optional)  #
+################################################################################
+sub parse_opts()
 {
-	my ($cvs_dir, $git_dir, $max_commits, $squash_date, $ignoreunknown, $removeprefix, $finisher, $help, $args, $component);
+	my ($opts, $args);
 
 	eval
 	{
 		local $SIG{__WARN__} = sub { die "@_"; };
 
 		GetOptions(
-				'cvsdir=s'        => \$cvs_dir,
-				'gitdir=s'        => \$git_dir,
-				'maxcommits=i'    => \$max_commits,
-				'squashdate=s'    => \$squash_date,
-				'finisher=s'      => \$finisher,
-				'ignore-unknown'  => \$ignoreunknown,
-				'remove-prefix=s' => \$removeprefix,
-				'help'            => \$help);
+				'cvsdir=s'        => \$opts->{'cvsdir'},
+				'gitdir=s'        => \$opts->{'gitdir'},
+				'maxcommits=i'    => \$opts->{'maxcommits'},
+				'squashdate=s'    => \$opts->{'squashdate'},
+				'finisher=s'      => \$opts->{'finisher'},
+				'allow-unknown'   => \$opts->{'allowunknown'},
+				'remove-prefix=s' => \$opts->{'removeprefix'},
+				'help'            => \$opts->{'help'})
 	};
 
 	chomp ($args = $@) if $@;
@@ -720,70 +765,79 @@ sub main()
 	{
 		warn "There were warnings/errors parsing the command line:\n" .
 			 "\t$args\n\n";
-		++$help;
+		help();
 	}
-	elsif (!defined $cvs_dir or !defined $git_dir)
+	elsif (!defined $opts->{'cvsdir'} or !defined $opts->{'gitdir'})
 	{
-		warn "undefined ${\($cvs_dir ? 'git' : 'cvs' )}-dir, please fix!\n\n";
-		++$help;
+		warn "cvs- and git-dir are mandatory, please fix!\n\n";
+		help();
 	}
-	elsif (defined $finisher and not -x $finisher)
+	elsif (defined $opts->{'finisher'} and not -x $opts->{'finisher'})
 	{
-		warn "finisher script '$finisher' is not an executable file!\n\n";
-		++$help;
+		warn "finisher script '$opts->{'finisher'}' is not executable!\n\n";
+		help();
 	}
 
-	help() if $help;
+	help() if $opts->{'help'};
 
-	$squash_date = str2time($squash_date);
-
-	$cvs_dir = rel2abs($cvs_dir);
-	if ($cvs_dir =~ m|/components/tgz/*$|)
+	$opts->{'cvsdir'} = rel2abs($opts->{'cvsdir'});
+	if (! -d $opts->{'cvsdir'} or ! -d "$opts->{'cvsdir'}/CVS")
 	{
-	    print "Converting toplevel\n";
+		die "Source CVS dir $opts->{'cvsdir'} does not exist " .
+			"or is not a CVS directory!";
 	}
-	elsif ($cvs_dir =~ m|/?([^/]+)/*$|)
+
+	$opts->{'gitdir'} = rel2abs($opts->{'gitdir'});
+	if (! -d $opts->{'gitdir'})
+	{
+		die "Source CVS dir $opts->{'gitdir'} does not exist!";
+	}
+
+	if (0 != system('git', '--git-dir', "$opts->{'gitdir'}/.git", 'rev-parse'))
+	{
+		cd($opts->{'gitdir'});
+		system('git', '--init') or die "unable to create empty git-repo: $!";
+	}
+
+	$opts->{'squashdate'} = defined $opts->{'squashdate'} ?
+		str2time($opts->{'squashdate'}) : 0;
+
+	if (defined $opts->{'removeprefix'})
+	{
+		$opts->{'removeprefix'} .= '/' if ($opts->{'removeprefix'} !~ m|/$|);
+	}
+
+	return %$opts;
+}
+
+sub main()
+{
+	my ($component, %commits, $commits);
+	my %opts = parse_opts();
+
+	if ($opts{'cvsdir'} =~ m|/?([^/]+)/*$|)
 	{
 		$component = $1;
-		print "Converting component $component in directory $cvs_dir\n";
+		print "Converting component $component in directory $opts{'cvsdir'}\n";
 	}
-	else
+	$opts{'removeprefix'}.= "$component/" if (defined $component);
+
+	cd($opts{'cvsdir'});
+	parse_commit_log('cvs log -r1 2>/dev/null',
+					 $opts{'removeprefix'},
+					 $opts{'allowunknown'},
+					 \%commits);
+	#print Data::Dumper->Dump([\%commits], [qw/foo/]);
+	$commits = create_commits(\%commits,
+							  $opts{'cvsdir'},
+							  $opts{'gitdir'},
+							  $opts{'maxcommits'},
+							  $opts{'squashdate'});
+
+	if ($opts{'finisher'})
 	{
-		die "Unable to determine component from directory name $cvs_dir\n";
-	}
-
-	# Qualify $git_dir if needed
-	$git_dir = rel2abs($git_dir);
-
-	unless (-d $git_dir)
-	{
-		die "Destination Git directory '$git_dir' not existing\n";
-	}
-
-	system('git', '--git-dir', "$git_dir/.git", 'rev-parse') == 0
-	  or die "Directory '$git_dir' is no Git working directory\n";
-
-	cd($cvs_dir);
-
-	my (%commits, $commits);
-	my $prefix = $removeprefix ? $removeprefix : '/export/sina/cvs/components/tgz/';
-
-	if (defined $component)
-	{
-		$prefix =~ s|/$||g;
-	    $prefix .= "/$component/";
-	}
-
-	#parse_commit_log('cvs log -r1 2>/dev/null', $prefix, $ignoreunknown, \%commits);
-	#parse_commit_log('cat lcdproc.cvslog', $prefix, $ignoreunknown, \%commits);
-	parse_commit_log('cat lcdproc.cvslog', '/cvsroot/lcdproc/lcdproc/', $ignoreunknown, \%commits);
-	print Data::Dumper->Dump([\%commits], [qw(foo)]);
-	exit;
-	$commits = create_commits(\%commits, $cvs_dir, $git_dir, $max_commits, $squash_date ? $squash_date : 0);
-
-	if ($finisher)
-	{
-		system("$finisher", "$cvs_dir", "$git_dir", "$commits");
+		system($opts{'finisher'}, $opts{'cvsdir'},
+			   $opts{'gitdir'}, $commits);
 	}
 }
 
