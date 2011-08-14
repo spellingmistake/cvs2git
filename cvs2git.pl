@@ -650,6 +650,7 @@ sub create_commits($$$$%)
 			my ($revision, $filename, $prev_revision, $tmp);
 			my $file_mode;
 
+			# TODO add tags!
 			$revision = ${$file}{"revision"};
 			$filename = ${$file}{"filename"};
 			$prev_revision = $revisions{$filename};
