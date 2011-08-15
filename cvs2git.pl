@@ -797,7 +797,7 @@ sub parse_opts()
 	if (0 != system('git', '--git-dir', "$opts->{'gitdir'}/.git", 'rev-parse'))
 	{
 		cd($opts->{'gitdir'});
-		system('git', '--init') or die "unable to create empty git-repo: $!";
+		system('git', 'init') or die "unable to create empty git-repo: $!";
 	}
 
 	$opts->{'squashdate'} = defined $opts->{'squashdate'} ?
