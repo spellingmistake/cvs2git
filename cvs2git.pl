@@ -176,8 +176,6 @@ sub populate_commit_hash(%$$)
 			'comment'  => join("\n", @{$infos->{'comment'}}),
 			'date'     => $date,
 		};
-		# all files of a particular commit have the same tags
-		$commits->{$commit_tag}->{'tags'} = $infos->{'tags'} if $infos->{'tags'};
 
 		# TODO re-enable this
 		#print "\rProcessed commit " . ++$$count;
@@ -188,6 +186,18 @@ sub populate_commit_hash(%$$)
 		'revision' => $infos->{'rev'},
 		'filename' => $filename,
 	};
+
+	if ($infos->{'tags'})
+	{
+		foreach my $tag (@{$infos->{'tags'}})
+		{
+			if (!defined $commits->{'tags'}->{$tag} or
+				defined $commits->{'tags'}->{$tag} < $epoch)
+			{
+				$commits->{'tags'}->{$tag} = $epoch
+			}
+		}
+	}
 
 	# clear up info hash except for the filename
 	undef $$rinfos;
