@@ -29,7 +29,7 @@ Usage: $0 --cvsdir <cvs_dir> --gitdir <git_dir>
           [--maxcommits <max number of commits>]
           [--squashdate <date up to which commits will be squashed>]
           [--finisher <scriptlet>] [--remove-prefix <prefix>]
-          [--allow-unknown] [--help]
+          [--debug] [--dry-run] [--allow-unknown] [--help]
 
 Convert CVS component in directory cvs-directory and store all commits
 in git_directory.
@@ -67,6 +67,11 @@ as command line arguments;
 the optional parameter allow-unknown allows for unknown authors (i.e.
 those not included in authors hash to not cause this program to fail
 but to keep running modifying the commit message a little.
+
+Use --dry-run to see what the script would do (except for retrieval of the
+CVS commit log)
+
+the --debug option does print the commands executed on STDOUT
 
 the optional parameter remove-prefix is the prefix to be removed from
 path and defaults to '/export/sina/cvs/components/tgz/'
@@ -178,7 +183,7 @@ sub populate_commit_hash(%$$)
 		};
 
 		# TODO re-enable this
-		#print "\rProcessed commit " . ++$$count;
+		print "\rProcessed commit " . ++$$count;
 	}
 
 	unshift @{${$commits->{$commit_tag}}{'files'}},
@@ -224,12 +229,13 @@ sub BUILD_COMMIT_LOG() { return 8; }
 # in:  cmd           command to execute for cvs log (e.g. a cat command)       #
 #      prefix        prefix to remove from cvs path                            #
 #      allow         allow unknown authors                                     #
+#      debug         1 == debug, 2 == dry-run                                  #
 #      commits       hash ref to store results in                              #
 # out: number of commits                                                       #
 ################################################################################
-sub parse_commit_log($$$%)
+sub parse_commit_log($$$$%)
 {
-	my ($cmd, $prefix, $allow, $commits) = @_;
+	my ($cmd, $prefix, $allow, $debug, $commits) = @_;
 	my ($state, $infos, $tags, $count, $buf, $rest, %unknown_authors);
 
 	$state = START;
@@ -402,56 +408,56 @@ sub cd($)
 	chdir $_[0] or die "Failed to change to directory '$_[0]': $!";
 }
 
-sub do_command($$)
+sub do_command($;$)
 {
-	# TODO: re-enable
 	my ($cmd, $debug) = @_;
-	#print "$cmd\n";
-	#print "$cmd\n" if $debug;
-	#`$cmd`;
+	print "@{$cmd}\n" if $debug;
+	if ($debug != 2)
+	{
+		system(@{$cmd}) == 0 or warn "Failed to run command: $?";
+	}
 }
 
-sub do_command_no_output
+sub do_command_with_redirect($$;$)
 {
-	# TODO: re-enable
-	#print "@_\n";
-	#system(@_) == 0 or warn "Failed to run command: $?";
-}
+	my ($cmd, $filename, $debug) = @_;
 
-# Parameters: filename => , command =>
-sub do_command_with_redirect(%)
-{
-	# TODO: re-enable
-    my %params = @_;
-	#print "@{$params{'command'}}\n";
-    #my $filename = $params{filename} or die "Missing filename parameter";
-    #my $command = $params{command} or die "Missing commmand parameter";
-    #my $file = IO::File->new($filename, 'w') or die "Failed to write to file: $!";
+	$filename or die "Invalid filename parameter";
+	$cmd or die "Invalid commmand parameter";
 
-    #print "@$command -> $filename\n" if $params{debug};
+	if ($debug)
+	{
+		print "@{$cmd} -> $filename\n";
+	}
+	else
+	{
+		my ($file, $pid);
 
-    #my $pid = fork();
-    #if ($pid == 0)
-	#{
-	#	dup2(fileno($file), 1);
-	#	exec (@$command);
-	#	die "cmd failed";
-    #}
-	#elsif ($pid > 0)
-	#{
-	#	waitpid($pid, 0);
-	#	if ($? != 0)
-	#	{
-	#		# TODO catch errors about anon cvs user here!
-	#	die "Command returned error code $pid\n";
-	#		#return 1;
-	#	}
-	#	$file->close;
-    #}
-	#else
-	#{
-	#	die "Fork failed with: $!";
-    #}
+		$file = IO::File->new($filename, 'w') or die "Failed to write to file: $!";
+		$pid = fork();
+
+		if (0 == $pid)
+		{
+			dup2(fileno($file), 1);
+			exec (@{$cmd});
+			die "cmd failed";
+		}
+		elsif ($pid > 0)
+		{
+			waitpid($pid, 0);
+			if ($? != 0)
+			{
+				# TODO catch errors about anon cvs user here!
+				#die "Command returned error code $pid\n";
+				return 1;
+			}
+			$file->close;
+		}
+		else
+		{
+			die "Fork failed with: $!";
+		}
+	}
 
 	return 0;
 }
@@ -553,31 +559,32 @@ sub trim_comment($)
 	"$ret\n";
 }
 
-sub cvs2git($$$$) {
-	my ($filename, $revision, $mode, $git_dir) = @_;
+sub cvs2git($$$$$) {
+	my ($filename, $revision, $mode, $git_dir, $debug) = @_;
 
-	my $destination_file = "$git_dir/$filename";
-	mkpath(dirname($destination_file));
+	my $file = "$git_dir/$filename";
+	mkpath(dirname($file));
 
 	my $ret;
 	do
 	{
-		$ret = do_command_with_redirect(
-				filename => $destination_file,
-				debug    => 1,
-				command  => ['cvs', 'update', '-p', '-r', $revision, $filename]);
+		$ret = do_command_with_redirect(['cvs', 'update', '-p', '-r', $revision, $filename], $file, $debug);
 	} while ($ret == 1);
 
 	if (defined $mode)
 	{
-		# TODO re-enable
-		#chmod $mode, $destination_file or die "Failed to chmod file '$destination_file': $!";
+		print "chmod $mode $file\n" if ($debug);
+
+		if (2 > $debug)
+		{
+			chmod $mode, $file or die "Failed to chmod file '$file': $!";
+		}
 	}
 }
 
-sub create_commits($$$$%)
+sub create_commits(%$$$$$)
 {
-	my ($commits, $cvs_dir, $git_dir, $end, $squash_date) = @_;
+	my ($commits, $cvs_dir, $git_dir, $end, $squash_date, $debug) = @_;
 	my (%revisions, $total, $i, $count, $start_date, $end_date, $squashed);
 	my (undef, $temp_file) = tempfile();
 	$squashed = 0;
@@ -635,13 +642,13 @@ sub create_commits($$$$%)
 				foreach my $filename (sort (keys %revisions))
 				{
 					$commit_str .= "\t$filename: revision $revisions{$filename}\n";
-					cvs2git($filename, $revisions{$filename}, undef, $git_dir);
+					cvs2git($filename, $revisions{$filename}, undef, $git_dir, $debug);
 				}
 				cd($git_dir);
-				do_command_no_output('git', 'add', '.');
+				do_command(['git', 'add', '.'], $debug);
 				print $commit_str;
 				write_file($temp_file, $commit_str);
-				do_command("$env git commit -F $temp_file", 1);
+				do_command(["$env", 'git', 'commit', '-F', "$temp_file"], $debug);
 				++$count;
 				cd($cvs_dir);
 			}
@@ -689,7 +696,7 @@ sub create_commits($$$$%)
 					push @git_remove, $filename;
 					$commit_str{$filename} = "\t$filename: $prev_revision deleted\n";
 				} else {
-					do_command_no_output('rm', $filename);
+					do_command(['rm', $filename], $debug);
 				}
 
 				# Skip the following cvs add and cvs update operations
@@ -704,7 +711,7 @@ sub create_commits($$$$%)
 			$revisions{$filename} = $revision;
 
 			if ($do_commit) {
-				cvs2git($filename, $revision, $file_mode, $git_dir);
+				cvs2git($filename, $revision, $file_mode, $git_dir, $debug);
 			}
 		}
 
@@ -719,15 +726,15 @@ sub create_commits($$$$%)
 			{
 				if ($do_commit)
 				{
-					do_command_no_output('git', 'rm', '-f', $a);
+					do_command(['git', 'rm', '-f', $a], $debug);
 				}
 			}
 
-			do_command_no_output('git', 'add', '.');
+			do_command(['git', 'add', '.'], $debug);
 			# commit changes
 			#print "$commit_str\n------\n";
 			write_file($temp_file, $commit_str);
-			do_command("$env git commit -F $temp_file", 1);
+			do_command(["$env", 'git', 'commit', '-F', "$temp_file"], $debug);
 			# unlink temporary files
 			#unlink "msg", "patch.diff";
 			++$count;
@@ -767,6 +774,8 @@ sub parse_opts()
 				'finisher=s'      => \$opts->{'finisher'},
 				'allow-unknown'   => \$opts->{'allowunknown'},
 				'remove-prefix=s' => \$opts->{'removeprefix'},
+				'dry-run'         => \$opts->{'dryrun'},
+				'debug'           => \$opts->{'debug'},
 				'help'            => \$opts->{'help'})
 	};
 
@@ -807,7 +816,7 @@ sub parse_opts()
 	if (0 != system('git', '--git-dir', "$opts->{'gitdir'}/.git", 'rev-parse'))
 	{
 		cd($opts->{'gitdir'});
-		system('git', 'init') or die "unable to create empty git-repo: $!";
+		system('git', 'init') and die "unable to create empty git-repo: $!";
 	}
 
 	$opts->{'squashdate'} = defined $opts->{'squashdate'} ?
@@ -817,6 +826,13 @@ sub parse_opts()
 	{
 		$opts->{'removeprefix'} .= '/' if ($opts->{'removeprefix'} !~ m|/$|);
 	}
+
+	if (defined $opts->{'dryrun'})
+	{
+		$opts->{'debug'} = 2;
+		delete $opts->{'dryrun'};
+	}
+	$opts->{'debug'} = 0 if !defined $opts->{'debug'};
 
 	return %$opts;
 }
@@ -837,13 +853,16 @@ sub main()
 	parse_commit_log('cvs log -r1 2>/dev/null',
 					 $opts{'removeprefix'},
 					 $opts{'allowunknown'},
+					 $opts{'debug'},
 					 \%commits);
 	#print Data::Dumper->Dump([\%commits], [qw/foo/]);
+	#exit;
 	$commits = create_commits(\%commits,
 							  $opts{'cvsdir'},
 							  $opts{'gitdir'},
 							  $opts{'maxcommits'},
-							  $opts{'squashdate'});
+							  $opts{'squashdate'},
+							  $opts{'debug'});
 
 	if ($opts{'finisher'})
 	{
