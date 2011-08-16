@@ -649,6 +649,7 @@ sub create_commits(%$$$$$)
 	{
 		my ($author, $mail, $commit_str, $headline, $comment, $epoch, $date, $env, $login, $do_commit);
 
+		next if $commit eq 'tags';
 		die "no files: $commit" if 0 == (scalar @{${$commits->{$commit}}{"files"}});
 
 		$login = (split /\Q_|||_\E/, $commit)[2];
