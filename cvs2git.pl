@@ -133,13 +133,17 @@ sub populate_commit_hash(%$$)
 	my ($commits, $rinfos, $count) = @_;
 	my (@commit_tags, $commit_tag, $epoch, $filename);
 
-	return  if $$rinfos->{'rev'} !~ /^[0-9]+\.[0-9]+$/;
+	if ($$rinfos->{'curr'}->{'rev'} !~ /^[0-9]+\.[0-9]+$/)
+	{
+		delete $$rinfos->{'curr'};
+		return;
+	}
 
 	my $infos = $$rinfos;
-	$infos->{'rev'} = 'dead' if ($infos->{'state'} eq 'dead');
-	$infos->{'commitid'} = "<unknown>" if (!exists $infos->{'commitid'});
+	$infos->{'curr'}->{'rev'} = 'dead' if ($infos->{'curr'}->{'state'} eq 'dead');
+	$infos->{'curr'}->{'commitid'} = "<unknown>" if (!exists $infos->{'curr'}->{'commitid'});
 
-	$epoch = $infos->{'epoch'};
+	$epoch = $infos->{'curr'}->{'epoch'};
 	$filename = $infos->{'filename'};
 
 	# CVS commits aren't atomic in means of time (or any other)
@@ -150,13 +154,13 @@ sub populate_commit_hash(%$$)
 	# message to be 100% sure it's really the same commit;
 	for my $i (-15 .. 15)
 	{
-		my $tag = generate_commit_hash($epoch + $i, $infos->{'commitid'},
-									   $infos->{'author'});
+		my $tag = generate_commit_hash($epoch + $i, $infos->{'curr'}->{'commitid'},
+									   $infos->{'curr'}->{'author'});
 
 		if (exists $commits->{$tag})
 		{
 			# compare commit messages
-			if ($commits->{$tag}->{'comment'} eq (join("\n", @{$infos->{'comment'}})))
+			if ($commits->{$tag}->{'comment'} eq (join("\n", @{$infos->{'curr'}->{'comment'}})))
 			{
 				$commit_tag = $tag;
 				last;
@@ -167,8 +171,8 @@ sub populate_commit_hash(%$$)
 	if (!defined $commit_tag)
 	{
 		# we need a new kenn^w commit tag
-		$commit_tag = generate_commit_hash($epoch, $infos->{'commitid'},
-										   $infos->{'author'});
+		$commit_tag = generate_commit_hash($epoch, $infos->{'curr'}->{'commitid'},
+										   $infos->{'curr'}->{'author'});
 	}
 
 	if (!exists $commits->{$commit_tag})
@@ -178,23 +182,24 @@ sub populate_commit_hash(%$$)
 		chomp $date;
 		$commits->{$commit_tag} =
 		{
-			'comment'  => join("\n", @{$infos->{'comment'}}),
+			'comment'  => join("\n", @{$infos->{'curr'}->{'comment'}}),
 			'date'     => $date,
 		};
 
-		# TODO re-enable this
 		print "\rProcessed commit " . ++$$count;
 	}
 
-	unshift @{${$commits->{$commit_tag}}{'files'}},
+	my $hash =
 	{
-		'revision' => $infos->{'rev'},
+		'revision' => $infos->{'curr'}->{'rev'},
 		'filename' => $filename,
 	};
+	$hash->{'binary'} = 1 if $infos->{'binary'};
+	unshift @{${$commits->{$commit_tag}}{'files'}}, $hash;
 
-	if ($infos->{'tags'})
+	if ($infos->{'curr'}->{'tags'})
 	{
-		foreach my $tag (@{$infos->{'tags'}})
+		foreach my $tag (@{$infos->{'curr'}->{'tags'}})
 		{
 			if (!defined $commits->{'tags'}->{$tag} or
 				defined $commits->{'tags'}->{$tag} < $epoch)
@@ -205,7 +210,7 @@ sub populate_commit_hash(%$$)
 	}
 
 	# clear up info hash except for the filename
-	undef $$rinfos;
+	delete $$rinfos->{'curr'};
 	$$rinfos->{'filename'} = $filename;
 }
 
@@ -308,6 +313,11 @@ sub parse_commit_log($$$$%)
 					# ignore branches!
 					unshift @{$tags->{$rev}}, $tag if $rev =~ /[0-9]+\.[0-9]+/;
 				}
+				elsif ($line =~ /^keyword substitution: b/)
+				{
+					# for now this only handles binary keyword substitution
+					$infos->{'binary'} = 1;
+				}
 				elsif ($line eq ('-' x 28))
 				{
 					$state = SKIP_TO_REVISION;
@@ -318,8 +328,8 @@ sub parse_commit_log($$$$%)
 			{
 				if ($line =~ /^revision (\S+)/)
 				{
-					$infos->{'rev'} = $1;
-					$infos->{'tags'} = $tags->{$1} if defined $tags->{$1};
+					$infos->{'curr'}->{'rev'} = $1;
+					$infos->{'curr'}->{'tags'} = $tags->{$1} if defined $tags->{$1};
 					$state = SKIP_TO_INFOS;
 				}
 				next;
@@ -328,17 +338,17 @@ sub parse_commit_log($$$$%)
 			{
 				if ($line =~ /date: (\S+) (.*?);/)
 				{
-					$infos->{'epoch'} = str2time("$1 $2");
+					$infos->{'curr'}->{'epoch'} = str2time("$1 $2");
 				}
 
 				if ($line =~ /author: (.*?);/)
 				{
 					$unknown_authors{$1} = 1 if (!defined $authors{$1} and !$allow);
-					$infos->{'author'} = $1;
+					$infos->{'curr'}->{'author'} = $1;
 				}
 
-				$infos->{'state'} = $1 if ($line =~ /state: (.*?);/);
-				$infos->{'commitid'} = $1 if ($line =~ /commitid: (.*?);/);
+				$infos->{'curr'}->{'state'} = $1 if ($line =~ /state: (.*?);/);
+				$infos->{'curr'}->{'commitid'} = $1 if ($line =~ /commitid: (.*?);/);
 
 				$state = SKIP_TO_BRANCH_INFO;
 				next;
@@ -352,7 +362,7 @@ sub parse_commit_log($$$$%)
 				else
 				{
 					# message already belongs to commit message
-					push @{$infos->{'comment'}}, $line;
+					push @{$infos->{'curr'}->{'comment'}}, $line;
 					$state = BUILD_COMMIT_LOG;
 				}
 
@@ -375,7 +385,7 @@ sub parse_commit_log($$$$%)
 				else
 				{
 					# part of the commit message
-					push @{$infos->{'comment'}}, $line;
+					push @{$infos->{'curr'}->{'comment'}}, $line;
 				}
 				next;
 			}
