@@ -100,22 +100,24 @@ sub generate_commit_hash($$$)
 }
 
 ################################################################################
-# build_env_string - build environemnt for git to accept author date and mail  #
-#                    for a commit                                              #
+# build_env_hash - build environemnt for git to accept author date and mail    #
+#                  for a commit                                                #
 # in:  date - date to use for author date value                                #
 #      author - author to use with commit                                      #
 #      mail - mail address of the author                                       #
 #      cdate - commit date to use with commit (defaults to date if omited)     #
 # out: environemnt string to use with git commit                               #
 ################################################################################
-sub build_env_string($$$;$)
+sub build_env_hash($$$;$)
 {
 	my ($date, $author, $mail, $cdate) = @_;
 
-	"GIT_AUTHOR_DATE='$date' " .
-	"GIT_AUTHOR_NAME='$author' " .
-	"GIT_AUTHOR_EMAIL='$mail' " .
-	"GIT_COMMITTER_DATE='${\(defined $cdate ? $cdate : $date)}'";
+	{
+		'GIT_AUTHOR_DATE'       => $date,
+		'GIT_AUTHOR_NAME'       => $author,
+		'GIT_AUTHOR_EMAIL'      => $mail,
+		'GIT_COMMITTER_DATE'    => "${\(defined $cdate ? $cdate : $date)}"
+	}
 }
 
 ################################################################################
@@ -429,13 +431,22 @@ sub cd($)
 # in:  command  - command to execute (must be an array ref)                    #
 #      debug    - 1 == debug, 2 == dry-run                                     #
 #      filename - optional filename to use for STDOUT redirection              #
+#      environ  - environment to use with command                              #
 # out: 0 on success, 1 otherwise                                               #
 ################################################################################
-sub do_command($;$$)
+sub do_command($;$$$)
 {
-	my ($cmd, $debug, $filename) = @_;
+	my ($cmd, $debug, $filename, $environ) = @_;
 
 	$cmd or die "Invalid commmand parameter";
+
+	if (defined $environ)
+	{
+		foreach my $name (keys %{$environ})
+		{
+			$ENV{$name} = $environ->{$name};
+		}
+	}
 
 	if ($debug)
 	{
@@ -679,9 +690,9 @@ sub create_commits(%$$$$$)
 					"$start_date and ending $end_date\n" .
 					"into a single commit to simplify git history.\n\nfiles:\n";
 				$squashed = 0;
-				$env = build_env_string($end_date,
-										"Cvs T. Git (cvs2git.pl)",
-										'hakke_007@gmx.de');
+				$env = build_env_hash($end_date,
+									  "Cvs T. Git (cvs2git.pl)",
+									  'hakke_007@gmx.de');
 
 				foreach my $filename (sort (keys %revisions))
 				{
@@ -695,7 +706,7 @@ sub create_commits(%$$$$$)
 				do_command(['git', 'add', '.'], $debug);
 				print $commit_str;
 				write_file($temp_file, $commit_str);
-				do_command(["$env", 'git', 'commit', '-F', "$temp_file"], $debug);
+				do_command(['git', 'commit', '-F', "$temp_file"], $debug, $env);
 				++$count;
 				cd($cvs_dir);
 			}
@@ -770,7 +781,7 @@ sub create_commits(%$$$$$)
 		}
 
 		if ($do_commit) {
-			$env = build_env_string($date, $author, $mail);
+			$env = build_env_hash($date, $author, $mail);
 			cd($git_dir);
 			foreach my $a (@git_remove)
 			{
@@ -783,7 +794,7 @@ sub create_commits(%$$$$$)
 			do_command(['git', 'add', '.'], $debug);
 			# commit changes
 			write_file($temp_file, $commit_str);
-			do_command(["$env", 'git', 'commit', '-F', "$temp_file"], $debug);
+			do_command(['git', 'commit', '-F', "$temp_file"], $debug, undef, $env);
 			# unlink temporary files
 			#unlink "msg", "patch.diff";
 			++$count;
