@@ -408,28 +408,19 @@ sub cd($)
 	chdir $_[0] or die "Failed to change to directory '$_[0]': $!";
 }
 
-sub do_command($;$)
+sub do_command($;$$)
 {
-	my ($cmd, $debug) = @_;
-	print "@{$cmd}\n" if $debug;
-	if ($debug != 2)
-	{
-		system(@{$cmd}) == 0 or warn "Failed to run command: $?";
-	}
-}
+	my ($cmd, $debug, $filename) = @_;
 
-sub do_command_with_redirect($$;$)
-{
-	my ($cmd, $filename, $debug) = @_;
-
-	$filename or die "Invalid filename parameter";
 	$cmd or die "Invalid commmand parameter";
 
 	if ($debug)
 	{
-		print "@{$cmd} -> $filename\n";
+		print("@{$cmd}" . ($filename ? "-> $filename\n" : "\n"));
+		return 0 if 2 == $debug;
 	}
-	else
+
+	if ($filename)
 	{
 		my ($file, $pid);
 
@@ -457,6 +448,10 @@ sub do_command_with_redirect($$;$)
 		{
 			die "Fork failed with: $!";
 		}
+	}
+	else
+	{
+		system(@{$cmd}) == 0 or warn "Failed to run command: $?";
 	}
 
 	return 0;
@@ -561,14 +556,15 @@ sub trim_comment($)
 
 sub cvs2git($$$$$) {
 	my ($filename, $revision, $mode, $git_dir, $debug) = @_;
+	my ($file, $ret);
 
-	my $file = "$git_dir/$filename";
+	$file = "$git_dir/$filename";
 	mkpath(dirname($file));
 
-	my $ret;
 	do
 	{
-		$ret = do_command_with_redirect(['cvs', 'update', '-p', '-r', $revision, $filename], $file, $debug);
+		$ret = do_command(['cvs', 'update', '-p', '-r', $revision, $filename],
+						  $debug, $file);
 	} while ($ret == 1);
 
 	if (defined $mode)
@@ -732,7 +728,6 @@ sub create_commits(%$$$$$)
 
 			do_command(['git', 'add', '.'], $debug);
 			# commit changes
-			#print "$commit_str\n------\n";
 			write_file($temp_file, $commit_str);
 			do_command(["$env", 'git', 'commit', '-F', "$temp_file"], $debug);
 			# unlink temporary files
