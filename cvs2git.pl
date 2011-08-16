@@ -214,6 +214,9 @@ sub populate_commit_hash(%$$)
 	$$rinfos->{'filename'} = $filename;
 }
 
+################################################################################
+# <helper functions for commit log parser>                                     #
+################################################################################
 sub START() { return 0; }
 sub INITIAL() { return 1; }
 sub RCS_FILE() { return 2; }
@@ -223,6 +226,9 @@ sub SKIP_TO_REVISION() { return 5; }
 sub SKIP_TO_INFOS() { return 6; }
 sub SKIP_TO_BRANCH_INFO() { return 7; }
 sub BUILD_COMMIT_LOG() { return 8; }
+################################################################################
+# </helper functions for commit log parser>                                    #
+################################################################################
 
 ################################################################################
 # parse_commit_log - parse the commit log obtained by executing <cmd> (read in #
@@ -418,6 +424,13 @@ sub cd($)
 	chdir $_[0] or die "Failed to change to directory '$_[0]': $!";
 }
 
+################################################################################
+# do_command - execute command with optional redirection of output into file   #
+# in:  command  - command to execute (must be an array ref)                    #
+#      debug    - 1 == debug, 2 == dry-run                                     #
+#      filename - optional filename to use for STDOUT redirection              #
+# out: 0 on success, 1 otherwise                                               #
+################################################################################
 sub do_command($;$$)
 {
 	my ($cmd, $debug, $filename) = @_;
@@ -426,7 +439,7 @@ sub do_command($;$$)
 
 	if ($debug)
 	{
-		print("@{$cmd}" . ($filename ? "-> $filename\n" : "\n"));
+		print("@{$cmd}" . ($filename ? " -> $filename\n" : "\n"));
 		return 0 if 2 == $debug;
 	}
 
@@ -564,18 +577,43 @@ sub trim_comment($)
 	"$ret\n";
 }
 
-sub cvs2git($$$$$) {
-	my ($filename, $revision, $mode, $git_dir, $debug) = @_;
-	my ($file, $ret);
+################################################################################
+# cvs2git - perform actual cvs update of the file and redirect it into git     #
+#           repository                                                         #
+# in:  filename - filename of the CVS file to copy to git                      #
+#      revision - revision of the CVS file to use with update                  #
+#      gitdir   - git directory to use for file                                #
+#      mode     - file mode                                                    #
+#      binary   - is this a binary file?                                       #
+#      debug    - 1 == debug, 2 == dry-run                                     #
+################################################################################
+sub cvs2git($$$$$$) {
+	my ($filename, $revision, $gitdir, $mode, $binary, $debug) = @_;
+	my ($file, $cmd, $ret);
 
-	$file = "$git_dir/$filename";
-	mkpath(dirname($file));
+	$file = "$gitdir/$filename";
+	print "mkdir ${\(dirname($file))}\n" if $debug;
+	mkpath(dirname($file)) if 2 != $debug;
 
-	do
+	if (!$binary)
 	{
-		$ret = do_command(['cvs', 'update', '-p', '-r', $revision, $filename],
-						  $debug, $file);
-	} while ($ret == 1);
+		do
+		{
+			$ret = do_command(['cvs', 'update', '-p', '-r', $revision, $filename],
+							  $debug, $file);
+		} while ($ret == 1);
+	}
+	else
+	{
+		do
+		{
+			$ret = do_command(['cvs', 'update', '-r', $revision, $filename],
+							  $debug);
+		} while ($ret == 1);
+
+		print "cp $filename $file\n" if $debug;
+		copy($filename, $file) if 2 != $debug;
+	}
 
 	if (defined $mode)
 	{
@@ -593,9 +631,8 @@ sub create_commits(%$$$$$)
 	my ($commits, $cvs_dir, $git_dir, $end, $squash_date, $debug) = @_;
 	my (%revisions, $total, $i, $count, $start_date, $end_date, $squashed);
 	my (undef, $temp_file) = tempfile();
-	$squashed = 0;
 
-	$count = $i = 0;
+	$squashed = $count = $i = 0;
 	$total = scalar keys %{$commits};
 
 	if ($end)
@@ -647,8 +684,11 @@ sub create_commits(%$$$$$)
 
 				foreach my $filename (sort (keys %revisions))
 				{
+					my $binary = $commits->{$commit}->{$filename}{'binary'} ? 1 : 0;
+
 					$commit_str .= "\t$filename: revision $revisions{$filename}\n";
-					cvs2git($filename, $revisions{$filename}, undef, $git_dir, $debug);
+					cvs2git($filename, $revisions{$filename}, $git_dir,
+							undef, $binary, $debug);
 				}
 				cd($git_dir);
 				do_command(['git', 'add', '.'], $debug);
@@ -670,13 +710,14 @@ sub create_commits(%$$$$$)
 		my @git_remove;
 		my %commit_str;
 		foreach my $file (sort @{${$commits->{$commit}}{"files"}}) {
-			my ($revision, $filename, $prev_revision, $tmp);
+			my ($revision, $filename, $binary, $prev_revision, $tmp);
 			my $file_mode;
 
 			# TODO add tags!
-			$revision = ${$file}{"revision"};
-			$filename = ${$file}{"filename"};
+			$revision = ${$file}{'revision'};
+			$filename = ${$file}{'filename'};
 			$prev_revision = $revisions{$filename};
+			$binary = ${$file}{'binary'} ? 1 : 0;
 
 			next if ($revision =~ /\d+\.\d+\.\d+\./);
 
@@ -716,8 +757,10 @@ sub create_commits(%$$$$$)
 			# update revision for current file
 			$revisions{$filename} = $revision;
 
-			if ($do_commit) {
-				cvs2git($filename, $revision, $file_mode, $git_dir, $debug);
+			if ($do_commit)
+			{
+				cvs2git($filename, $revision, $git_dir,
+						$file_mode, $binary, $debug);
 			}
 		}
 
@@ -747,6 +790,7 @@ sub create_commits(%$$$$$)
 		return $count if $end && $i == $end;
 		cd($cvs_dir);
 	}
+
 	unlink($temp_file);
 	return $count;
 }
