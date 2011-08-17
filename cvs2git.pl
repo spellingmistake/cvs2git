@@ -137,6 +137,7 @@ sub populate_commit_hash(%$$)
 
 	if ($$rinfos->{'curr'}->{'rev'} !~ /^[0-9]+\.[0-9]+$/)
 	{
+		# skip all branch commits
 		delete $$rinfos->{'curr'};
 		return;
 	}
@@ -180,8 +181,7 @@ sub populate_commit_hash(%$$)
 	if (!exists $commits->{$commit_tag})
 	{
 		# TODO remove, it's redundant and for debugging only
-		my $date = ctime($epoch);
-		chomp $date;
+		chomp (my $date = ctime($epoch));
 		$commits->{$commit_tag} =
 		{
 			'comment'  => join("\n", @{$infos->{'curr'}->{'comment'}}),
@@ -597,6 +597,7 @@ sub trim_comment($)
 #      mode     - file mode                                                    #
 #      binary   - is this a binary file?                                       #
 #      debug    - 1 == debug, 2 == dry-run                                     #
+# out: number of commits done                                                  #
 ################################################################################
 sub cvs2git($$$$$$) {
 	my ($filename, $revision, $gitdir, $mode, $binary, $debug) = @_;
@@ -637,23 +638,34 @@ sub cvs2git($$$$$$) {
 	}
 }
 
+################################################################################
+# create_commits -                                                             #
+#                                                                              #
+# in:  commits     -                                                           #
+#      cvsdir      -                                                           #
+#      gitdir      -                                                           #
+#      end         -                                                           #
+#      squash_date -                                                           #
+#      count       -                                                           #
+#      debug       -                                                           #
+# out: number of commits done                                                  #
+################################################################################
 sub create_commits(%$$$$$)
 {
-	my ($commits, $cvs_dir, $git_dir, $end, $squash_date, $debug) = @_;
-	my (%revisions, $total, $i, $count, $start_date, $end_date, $squashed);
+	my ($commits, $cvsdir, $gitdir, $end, $squash_date, $count, $debug) = @_;
+	my (%revisions, $i, $commitno, $startdate, $enddate, $squashed);
 	my (undef, $temp_file) = tempfile();
 
-	$squashed = $count = $i = 0;
-	$total = scalar keys %{$commits};
+	$squashed = $commitno = $i = 0;
 
 	if ($end)
 	{
-		warn "Processing $end of the $total total commits\n";
-		$total = $end
+		warn "Processing $end of the $count total commits\n";
+		$count = $end
 	}
 	else
 	{
-		warn "Processing $total commits\n";
+		warn "Processing $count commits\n";
 	}
 
 	foreach my $commit (sort keys %{$commits})
@@ -663,34 +675,31 @@ sub create_commits(%$$$$$)
 		next if $commit eq 'tags';
 		die "no files: $commit" if 0 == (scalar @{${$commits->{$commit}}{"files"}});
 
-		$login = (split /\Q_|||_\E/, $commit)[2];
+		($epoch, undef, $login) = (split /\Q_|||_\E/, $commit);
 		($author, $mail) = (defined $authors{$login}) ?
 				@{$authors{$login}} : ($login, "unknown");
 		$author .= " ($login)" unless $author eq $login;
-
-		$epoch = (split /\Q_|||_\E/, $commit, 2)[0];
-		$date = ctime($epoch);
-		chomp $date;
+		chomp ($date = ctime($epoch));
 		$do_commit = $epoch > $squash_date;
 
 		if (!$do_commit)
 		{
-			warn "Skipping commit ${\(++$i)}/$total\n";
-			$start_date = $date if (!defined $start_date);
-			$end_date = $date;
+			warn "Skipping commit ${\(++$i)}/$count\n";
+			$startdate = $date if (!defined $startdate);
+			$enddate = $date;
 			++$squashed;
 		}
 		else
 		{
-			warn "Processing commit ${\(++$i)}/$total\n";
+			warn "Processing commit ${\(++$i)}/$count\n";
 			if ($squashed)
 			{
 				$commit_str = "CVS import: Initial squash-commit\n\n" .
 					"This commit squashes $squashed commits starting from\n" .
-					"$start_date and ending $end_date\n" .
+					"$startdate and ending $enddate\n" .
 					"into a single commit to simplify git history.\n\nfiles:\n";
 				$squashed = 0;
-				$env = build_env_hash($end_date,
+				$env = build_env_hash($enddate,
 									  "Cvs T. Git (cvs2git.pl)",
 									  'hakke_007@gmx.de');
 
@@ -699,29 +708,28 @@ sub create_commits(%$$$$$)
 					my $binary = $commits->{$commit}->{$filename}{'binary'} ? 1 : 0;
 
 					$commit_str .= "\t$filename: revision $revisions{$filename}\n";
-					cvs2git($filename, $revisions{$filename}, $git_dir,
+					cvs2git($filename, $revisions{$filename}, $gitdir,
 							undef, $binary, $debug);
 				}
-				cd($git_dir);
+				cd($gitdir);
 				do_command(['git', 'add', '.'], $debug);
-				print $commit_str;
 				write_file($temp_file, $commit_str);
 				do_command(['git', 'commit', '-F', "$temp_file"], $debug, $env);
-				++$count;
-				cd($cvs_dir);
+				++$commitno;
+				cd($cvsdir);
 			}
 		}
 
-		$comment = $commits->{$commit}->{'comment'};
+		($comment = (" " x 4) . $commits->{$commit}->{'comment'}) =~ s/\n/$& . (" " x 4)/eg;
 		$headline = trim_comment($comment);
-		$comment = (" " x 4). $comment;
-		$comment =~ s/\n/$& . (" " x 4)/eg;
 
 		$commit_str = "$headline\nCVS import: $author" .
 					  ", $date\n\noriginal comment:\n$comment\n\nfiles:\n";
+
 		my @git_remove;
 		my %commit_str;
-		foreach my $file (sort @{${$commits->{$commit}}{"files"}}) {
+		foreach my $file (sort @{${$commits->{$commit}}{"files"}})
+		{
 			my ($revision, $filename, $binary, $prev_revision, $tmp);
 			my $file_mode;
 
@@ -731,10 +739,10 @@ sub create_commits(%$$$$$)
 			$prev_revision = $revisions{$filename};
 			$binary = ${$file}{'binary'} ? 1 : 0;
 
-			next if ($revision =~ /\d+\.\d+\.\d+\./);
-
-			if (!defined $prev_revision) {
-				if ($revision eq 'dead') {
+			if (!defined $prev_revision)
+			{
+				if ($revision eq 'dead')
+				{
 					# skip file that was initially committed to other branch
 					next;
 				}
@@ -742,26 +750,36 @@ sub create_commits(%$$$$$)
 				# new file, push it to git_add and set (prev_)revision(s)
 				$commit_str{$filename} = "\t$filename: initial version ($revision)\n";
 				my $stat = stat($filename);
-				if (defined $stat) {
+				if (defined $stat)
+				{
 					$file_mode = $stat->mode & 0777;
-				} else {
+				}
+				else
+				{
 					# File do not exist (anymore), use some default moode
 					$file_mode = 0644;
 				}
 
 				$prev_revision = $revisions{$filename} = "1.0";
-			} elsif ($revision eq 'dead') {
-				if (!defined $commit_str{$filename}) {
+			}
+			elsif ($revision eq 'dead')
+			{
+				if (!defined $commit_str{$filename})
+				{
 					push @git_remove, $filename;
 					$commit_str{$filename} = "\t$filename: $prev_revision deleted\n";
-				} else {
+				}
+				else
+				{
 					do_command(['rm', $filename], $debug);
 				}
 
 				# Skip the following cvs add and cvs update operations
 				delete $revisions{$filename};
 				next;
-			} else {
+			}
+			else
+			{
 				# update commit string for file update only
 				$commit_str{$filename} = "\t$filename: $prev_revision -> $revision\n";
 			}
@@ -771,18 +789,20 @@ sub create_commits(%$$$$$)
 
 			if ($do_commit)
 			{
-				cvs2git($filename, $revision, $git_dir,
+				cvs2git($filename, $revision, $gitdir,
 						$file_mode, $binary, $debug);
 			}
 		}
 
-		foreach my $filename (sort (keys %commit_str)) {
+		foreach my $filename (sort (keys %commit_str))
+		{
 			$commit_str .= $commit_str{$filename};
 		}
 
-		if ($do_commit) {
+		if ($do_commit)
+		{
 			$env = build_env_hash($date, $author, $mail);
-			cd($git_dir);
+			cd($gitdir);
 			foreach my $a (@git_remove)
 			{
 				if ($do_commit)
@@ -797,14 +817,15 @@ sub create_commits(%$$$$$)
 			do_command(['git', 'commit', '-F', "$temp_file"], $debug, undef, $env);
 			# unlink temporary files
 			#unlink "msg", "patch.diff";
-			++$count;
+			++$commitno;
 		}
-		return $count if $end && $i == $end;
-		cd($cvs_dir);
+
+		return $commitno if $end && $i == $end;
+		cd($cvsdir);
 	}
 
 	unlink($temp_file);
-	return $count;
+	return $commitno;
 }
 
 ################################################################################
@@ -900,7 +921,7 @@ sub parse_opts()
 
 sub main()
 {
-	my ($component, %commits, $commits);
+	my ($component, %commits, $commits, $count);
 	my %opts = parse_opts();
 
 	if ($opts{'cvsdir'} =~ m|/?([^/]+)/*$|)
@@ -911,11 +932,11 @@ sub main()
 	$opts{'removeprefix'}.= "$component/" if (defined $component);
 
 	cd($opts{'cvsdir'});
-	parse_commit_log('cvs log -r1 2>/dev/null',
-					 $opts{'removeprefix'},
-					 $opts{'allowunknown'},
-					 $opts{'debug'},
-					 \%commits);
+	$count = parse_commit_log('cvs log -r1 2>/dev/null',
+							  $opts{'removeprefix'},
+							  $opts{'allowunknown'},
+							  $opts{'debug'},
+							  \%commits);
 	#print Data::Dumper->Dump([\%commits], [qw/foo/]);
 	#exit;
 	$commits = create_commits(\%commits,
@@ -923,6 +944,7 @@ sub main()
 							  $opts{'gitdir'},
 							  $opts{'maxcommits'},
 							  $opts{'squashdate'},
+							  $count,
 							  $opts{'debug'});
 
 	if ($opts{'finisher'})
