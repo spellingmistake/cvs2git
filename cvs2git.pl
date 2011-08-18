@@ -638,6 +638,65 @@ sub cvs2git($$$$$$) {
 	}
 }
 
+
+################################################################################
+# create_squash_commit - create a single commit from all files contained in    #
+#                        <squashed> hash ref;                                  #
+# in:  squashed - hash ref with files to commit, revision, binary status,      #
+#                 start and end date, as well as number of commits squashed    #
+#      cvsdir   - CVS directory to use                                         #
+#      gitdir   - git directory to use for file                                #
+#      tmpfile  - temporary file to use for git comment                        #
+#      debug    - 1 == debug, 2 == dry-run                                     #
+################################################################################
+sub create_squash_commit(%$$$$) {
+	my ($squashed, $cvsdir, $gitdir, $tmpfile, $debug) = @_;
+	my ($commitstr, $env, $filename, $binary, $only, $authors, $count);
+
+	$commitstr = <<EOF;
+CVS import: Initial squash-commit
+
+This commit squashes $squashed->{'count'} commit(s) starting from
+$squashed->{'start'} and ending $squashed->{'end'}
+into a single commit to simplify git history.
+Commits of the following authors (in order of number):
+EOF
+
+	$count = 0;
+	# helper sub for sorting by commit number
+
+	$authors = "";
+	foreach $a (sort
+				   {
+					   $squashed->{'authors'}->{$b} <=> $squashed->{'authors'}->{$a}
+				   } keys %{$squashed->{'authors'}})
+	{
+		$authors .= "\t$a: $squashed->{'authors'}->{$a}\n";
+		$only = $a;
+		++$count;
+	}
+	$commitstr .= "$authors\nfiles:\n";
+
+	$env = build_env_hash($squashed->{'end'},
+						  $count == 1 ? $only : "various artists",
+						  'hakke_007@gmx.de');
+	print Data::Dumper->Dump([$env], [qw/foo/]);
+
+	foreach my $filename (sort (keys %{$squashed->{'files'}}))
+	{
+		my ($revision, $binary) = @{$squashed->{'files'}->{$filename}};
+
+		$commitstr .= "\t$filename: revision $revision\n";
+		cvs2git($filename, $revision, $gitdir, undef, $binary, $debug);
+	}
+	print "$commitstr\n";
+	cd($gitdir);
+	do_command(['git', 'add', '.'], $debug);
+	write_file($tmpfile, $commitstr);
+	do_command(['git', 'commit', '-F', "$tmpfile"], $debug, undef, $env);
+	cd($cvsdir);
+}
+
 ################################################################################
 # create_commits -                                                             #
 #                                                                              #
@@ -653,10 +712,10 @@ sub cvs2git($$$$$$) {
 sub create_commits(%$$$$$)
 {
 	my ($commits, $cvsdir, $gitdir, $end, $squash_date, $count, $debug) = @_;
-	my (%revisions, $i, $commitno, $startdate, $enddate, $squashed);
-	my (undef, $temp_file) = tempfile();
+	my (%revisions, $squashed, $i, $commitno);
+	my (undef, $tmpfile) = tempfile();
 
-	$squashed = $commitno = $i = 0;
+	$commitno = $i = 0;
 
 	if ($end)
 	{
@@ -670,7 +729,7 @@ sub create_commits(%$$$$$)
 
 	foreach my $commit (sort keys %{$commits})
 	{
-		my ($author, $mail, $commit_str, $headline, $comment, $epoch, $date, $env, $login, $do_commit);
+		my ($author, $mail, $commitstr, $headline, $comment, $epoch, $date, $env, $login);
 
 		next if $commit eq 'tags';
 		die "no files: $commit" if 0 == (scalar @{${$commits->{$commit}}{"files"}});
@@ -680,66 +739,50 @@ sub create_commits(%$$$$$)
 				@{$authors{$login}} : ($login, "unknown");
 		$author .= " ($login)" unless $author eq $login;
 		chomp ($date = ctime($epoch));
-		$do_commit = $epoch > $squash_date;
 
-		if (!$do_commit)
+		if ($epoch <= $squash_date)
 		{
 			warn "Skipping commit ${\(++$i)}/$count\n";
-			$startdate = $date if (!defined $startdate);
-			$enddate = $date;
-			++$squashed;
+			if (!$squashed)
+			{
+				# intialize squashed hash
+				$squashed = { "start" => $date, "end" => $date, "count" => 0, };
+			}
+			++$squashed->{'count'};
+			$squashed->{'authors'}->{$author} = 0 if !defined $squashed->{'authors'}->{$author};
+			++$squashed->{'authors'}->{$author};
 		}
 		else
 		{
 			warn "Processing commit ${\(++$i)}/$count\n";
 			if ($squashed)
 			{
-				$commit_str = "CVS import: Initial squash-commit\n\n" .
-					"This commit squashes $squashed commits starting from\n" .
-					"$startdate and ending $enddate\n" .
-					"into a single commit to simplify git history.\n\nfiles:\n";
-				$squashed = 0;
-				$env = build_env_hash($enddate,
-									  "Cvs T. Git (cvs2git.pl)",
-									  'hakke_007@gmx.de');
-
-				foreach my $filename (sort (keys %revisions))
-				{
-					my $binary = $commits->{$commit}->{$filename}{'binary'} ? 1 : 0;
-
-					$commit_str .= "\t$filename: revision $revisions{$filename}\n";
-					cvs2git($filename, $revisions{$filename}, $gitdir,
-							undef, $binary, $debug);
-				}
-				cd($gitdir);
-				do_command(['git', 'add', '.'], $debug);
-				write_file($temp_file, $commit_str);
-				do_command(['git', 'commit', '-F', "$temp_file"], $debug, $env);
+				create_squash_commit($squashed, $cvsdir, $gitdir, $tmpfile,
+									 $debug);
+				 $squashed = undef;
 				++$commitno;
-				cd($cvsdir);
 			}
 		}
 
 		($comment = (" " x 4) . $commits->{$commit}->{'comment'}) =~ s/\n/$& . (" " x 4)/eg;
 		$headline = trim_comment($comment);
 
-		$commit_str = "$headline\nCVS import: $author" .
+		$commitstr = "$headline\nCVS import: $author" .
 					  ", $date\n\noriginal comment:\n$comment\n\nfiles:\n";
 
 		my @git_remove;
-		my %commit_str;
+		my %commitstr;
 		foreach my $file (sort @{${$commits->{$commit}}{"files"}})
 		{
-			my ($revision, $filename, $binary, $prev_revision, $tmp);
+			my ($revision, $filename, $binary, $tmp);
 			my $file_mode;
 
 			# TODO add tags!
 			$revision = ${$file}{'revision'};
 			$filename = ${$file}{'filename'};
-			$prev_revision = $revisions{$filename};
 			$binary = ${$file}{'binary'} ? 1 : 0;
 
-			if (!defined $prev_revision)
+			if (!defined $revisions{$filename})
 			{
 				if ($revision eq 'dead')
 				{
@@ -748,7 +791,7 @@ sub create_commits(%$$$$$)
 				}
 
 				# new file, push it to git_add and set (prev_)revision(s)
-				$commit_str{$filename} = "\t$filename: initial version ($revision)\n";
+				$commitstr{$filename} = "\t$filename: initial version ($revision)\n";
 				my $stat = stat($filename);
 				if (defined $stat)
 				{
@@ -760,14 +803,15 @@ sub create_commits(%$$$$$)
 					$file_mode = 0644;
 				}
 
-				$prev_revision = $revisions{$filename} = "1.0";
+				$revisions{$filename} = "1.0";
+				$squashed->{'files'}->{$filename} = [ "1.0", $binary ] if ($squashed);
 			}
 			elsif ($revision eq 'dead')
 			{
-				if (!defined $commit_str{$filename})
+				if (!defined $commitstr{$filename})
 				{
 					push @git_remove, $filename;
-					$commit_str{$filename} = "\t$filename: $prev_revision deleted\n";
+					$commitstr{$filename} = "\t$filename: $revisions{$filename} deleted\n";
 				}
 				else
 				{
@@ -776,55 +820,54 @@ sub create_commits(%$$$$$)
 
 				# Skip the following cvs add and cvs update operations
 				delete $revisions{$filename};
+				delete $squashed->{'files'}->{$filename} if ($squashed);
 				next;
 			}
 			else
 			{
 				# update commit string for file update only
-				$commit_str{$filename} = "\t$filename: $prev_revision -> $revision\n";
+				$commitstr{$filename} = "\t$filename: $revisions{$filename} -> $revision\n";
 			}
 
 			# update revision for current file
 			$revisions{$filename} = $revision;
+			$squashed->{'files'}->{$filename}->[0] = $revision if ($squashed);
 
-			if ($do_commit)
+			if ($epoch > $squash_date)
 			{
 				cvs2git($filename, $revision, $gitdir,
 						$file_mode, $binary, $debug);
 			}
 		}
 
-		foreach my $filename (sort (keys %commit_str))
+		foreach my $filename (sort (keys %commitstr))
 		{
-			$commit_str .= $commit_str{$filename};
+			$commitstr .= $commitstr{$filename};
 		}
 
-		if ($do_commit)
+		if ($epoch > $squash_date)
 		{
 			$env = build_env_hash($date, $author, $mail);
 			cd($gitdir);
 			foreach my $a (@git_remove)
 			{
-				if ($do_commit)
-				{
-					do_command(['git', 'rm', '-f', $a], $debug);
-				}
+				do_command(['git', 'rm', '-f', $a], $debug);
 			}
 
 			do_command(['git', 'add', '.'], $debug);
-			# commit changes
-			write_file($temp_file, $commit_str);
-			do_command(['git', 'commit', '-F', "$temp_file"], $debug, undef, $env);
-			# unlink temporary files
-			#unlink "msg", "patch.diff";
+			write_file($tmpfile, $commitstr);
+			do_command(['git', 'commit', '-F', "$tmpfile"], $debug, undef, $env);
+
 			++$commitno;
 		}
 
 		return $commitno if $end && $i == $end;
 		cd($cvsdir);
 	}
+	# all commits get squashed!
+	create_squash_commit($squashed, $cvsdir, $gitdir, $tmpfile, $debug) if ($squashed);
 
-	unlink($temp_file);
+	unlink($tmpfile);
 	return $commitno;
 }
 
