@@ -242,13 +242,12 @@ sub BUILD_COMMIT_LOG() { return 8; }
 # in:  cmd           command to execute for cvs log (e.g. a cat command)       #
 #      prefix        prefix to remove from cvs path                            #
 #      allow         allow unknown authors                                     #
-#      debug         1 == debug, 2 == dry-run                                  #
 #      commits       hash ref to store results in                              #
 # out: number of commits                                                       #
 ################################################################################
 sub parse_commit_log($$$$%)
 {
-	my ($cmd, $prefix, $allow, $debug, $commits) = @_;
+	my ($cmd, $prefix, $allow, $commits) = @_;
 	my ($state, $infos, $tags, $count, $buf, $rest, %unknown_authors);
 
 	$state = START;
@@ -370,7 +369,10 @@ sub parse_commit_log($$$$%)
 				else
 				{
 					# message already belongs to commit message
-					push @{$infos->{'curr'}->{'comment'}}, $line;
+					unless ($line =~ /^\s*$/)
+					{
+						push @{$infos->{'curr'}->{'comment'}}, "$line"
+					}
 					$state = BUILD_COMMIT_LOG;
 				}
 
@@ -393,7 +395,10 @@ sub parse_commit_log($$$$%)
 				else
 				{
 					# part of the commit message
-					push @{$infos->{'curr'}->{'comment'}}, $line;
+					unless ($line =~ /^\s*$/)
+					{
+						push @{$infos->{'curr'}->{'comment'}}, "$line"
+					}
 				}
 				next;
 			}
@@ -404,7 +409,6 @@ sub parse_commit_log($$$$%)
 	if (!$allow && scalar keys %unknown_authors)
 	{
 		my @unknown_authors = keys %unknown_authors;
-		local $" = ",\n\t";
 
 		die "Unknown authors found:\n\t@unknown_authors,\nPlease fix!";
 	}
@@ -448,11 +452,12 @@ sub do_command($;$$$)
 		}
 	}
 
-	if ($debug)
+	if ($debug & 1)
 	{
+		local $" = " ";
 		print("@{$cmd}" . ($filename ? " -> $filename\n" : "\n"));
-		return 0 if 2 == $debug;
 	}
+	return 0 if 2 & $debug;
 
 	if ($filename)
 	{
@@ -585,7 +590,7 @@ sub trim_comment($)
 		$ret =~ s/\s*$/.../;
 	}
 
-	"$ret\n";
+	$ret;
 }
 
 ################################################################################
@@ -594,18 +599,18 @@ sub trim_comment($)
 # in:  filename - filename of the CVS file to copy to git                      #
 #      revision - revision of the CVS file to use with update                  #
 #      gitdir   - git directory to use for file                                #
-#      mode     - file mode                                                    #
+#      param    - TODO                                                         #
 #      binary   - is this a binary file?                                       #
 #      debug    - 1 == debug, 2 == dry-run                                     #
 # out: number of commits done                                                  #
 ################################################################################
 sub cvs2git($$$$$$) {
-	my ($filename, $revision, $gitdir, $mode, $binary, $debug) = @_;
+	my ($filename, $revision, $gitdir, $param, $binary, $debug) = @_;
 	my ($file, $cmd, $ret);
 
 	$file = "$gitdir/$filename";
-	print "mkdir ${\(dirname($file))}\n" if $debug;
-	mkpath(dirname($file)) if 2 != $debug;
+	print "mkdir ${\(dirname($file))}\n" if $debug & 1;
+	mkpath(dirname($file)) if !$debug & 2;
 
 	if (!$binary)
 	{
@@ -623,21 +628,23 @@ sub cvs2git($$$$$$) {
 							  $debug);
 		} while ($ret == 1);
 
-		print "cp $filename $file\n" if $debug;
-		copy($filename, $file) if 2 != $debug;
+		print "cp $filename $file\n" if $debug & 1;
+		copy($filename, $file) if !$debug & 2;
 	}
 
-	if (defined $mode)
+	if ($param)
 	{
-		print "chmod $mode $file\n" if ($debug);
+		my $stat = stat($filename);
+		my $mode = defined $stat ? $stat->mode & 0777 : 0644;
 
-		if (2 > $debug)
+		print "chmod $mode $file\n" if $debug & 1;
+
+		if (!$debug & 2)
 		{
 			chmod $mode, $file or die "Failed to chmod file '$file': $!";
 		}
 	}
 }
-
 
 ################################################################################
 # create_squash_commit - create a single commit from all files contained in    #
@@ -657,8 +664,9 @@ sub create_squash_commit(%$$$$) {
 CVS import: Initial squash-commit
 
 This commit squashes $squashed->{'count'} commit(s) starting from
-$squashed->{'start'} and ending $squashed->{'end'}
+$squashed->{'start'} ending $squashed->{'end'}
 into a single commit to simplify git history.
+
 Commits of the following authors (in order of number):
 EOF
 
@@ -675,22 +683,77 @@ EOF
 		$only = $a;
 		++$count;
 	}
-	$commitstr .= "$authors\nfiles:\n";
+	$commitstr .= "$authors\nFiles:\n";
 
 	$env = build_env_hash($squashed->{'end'},
 						  $count == 1 ? $only : "various artists",
 						  'hakke_007@gmx.de');
-	print Data::Dumper->Dump([$env], [qw/foo/]);
 
-	foreach my $filename (sort (keys %{$squashed->{'files'}}))
+	foreach my $filename (sort(keys %{$squashed->{'files'}}))
 	{
 		my ($revision, $binary) = @{$squashed->{'files'}->{$filename}};
 
-		$commitstr .= "\t$filename: revision $revision\n";
-		cvs2git($filename, $revision, $gitdir, undef, $binary, $debug);
+		$commitstr .= "\tadded:    $filename -> $revision\n";
+		cvs2git($filename, $revision, $gitdir, 1, $binary, $debug);
 	}
-	print "$commitstr\n";
 	cd($gitdir);
+	do_command(['git', 'add', '.'], $debug);
+	write_file($tmpfile, $commitstr);
+	do_command(['git', 'commit', '-F', "$tmpfile"], $debug, undef, $env);
+	cd($cvsdir);
+}
+
+################################################################################
+# create_regular_commit -  create a regular commit from all files contained in #
+#                          <commitobj> hash ref;                               #
+# in:  commitobj - hash ref with files to commit, revision, binary status,     #
+#                  start and end date                                          #
+#      cvsdir    - CVS directory to use                                        #
+#      gitdir    - git directory to use for file                               #
+#      tmpfile   - temporary file to use for git comment                       #
+#      debug     - 1 == debug, 2 == dry-run                                    #
+################################################################################
+sub create_regular_commit(%$$$$)
+{
+	my ($commitobj, $cvsdir, $gitdir, $tmpfile, $debug) = @_;
+	my ($headline, $comment, $commitstr, $env);
+
+	$headline = trim_comment($commitobj->{'comment'});
+	($comment = (" " x 4) . $commitobj->{'comment'}) =~ s/\n/$& . (" " x 4)/eg;
+
+	$commitstr = <<EOF;
+$headline
+
+CVS import: $commitobj->{'author'}, $commitobj->{'date'}
+
+original comment:\n$comment
+
+Files:
+EOF
+	$env = build_env_hash($commitobj->{'date'},
+						  $commitobj->{'author'},
+						  $commitobj->{'mail'});
+
+
+	foreach my $filename (sort(keys %{$commitobj->{'added'}}))
+	{
+		my ($revision, $binary) = @{$commitobj->{'added'}->{$filename}};
+		cvs2git($filename, $revision, $gitdir, 1, $binary, $debug);
+		$commitstr .= "\tadded:    $filename -> $revision\n"
+	}
+
+	foreach my $filename (sort(keys %{$commitobj->{'updated'}}))
+	{
+		my ($revision, $binary) = @{$commitobj->{'updated'}->{$filename}};
+		cvs2git($filename, $revision, $gitdir, 0, $binary, $debug);
+		$commitstr .= "\tupdated:  $filename -> $revision\n"
+	}
+	cd($gitdir);
+	foreach my $filename (sort(keys %{$commitobj->{'removed'}}))
+	{
+		do_command(['git', 'rm', '-f', $filename], $debug);
+		$commitstr .= "\tremoved:  $filename\n"
+	}
 	do_command(['git', 'add', '.'], $debug);
 	write_file($tmpfile, $commitstr);
 	do_command(['git', 'commit', '-F', "$tmpfile"], $debug, undef, $env);
@@ -729,7 +792,7 @@ sub create_commits(%$$$$$)
 
 	foreach my $commit (sort keys %{$commits})
 	{
-		my ($author, $mail, $commitstr, $headline, $comment, $epoch, $date, $env, $login);
+		my ($commitobj, $author, $mail, $epoch, $date, $login);
 
 		next if $commit eq 'tags';
 		die "no files: $commit" if 0 == (scalar @{${$commits->{$commit}}{"files"}});
@@ -764,107 +827,60 @@ sub create_commits(%$$$$$)
 			}
 		}
 
-		($comment = (" " x 4) . $commits->{$commit}->{'comment'}) =~ s/\n/$& . (" " x 4)/eg;
-		$headline = trim_comment($comment);
+		$commitobj->{'comment'} = $commits->{$commit}->{'comment'};
+		$commitobj->{'date'} = $date;
+		$commitobj->{'author'} = $author;
+		$commitobj->{'mail'} = $mail;
 
-		$commitstr = "$headline\nCVS import: $author" .
-					  ", $date\n\noriginal comment:\n$comment\n\nfiles:\n";
-
-		my @git_remove;
-		my %commitstr;
 		foreach my $file (sort @{${$commits->{$commit}}{"files"}})
 		{
-			my ($revision, $filename, $binary, $tmp);
-			my $file_mode;
-
 			# TODO add tags!
-			$revision = ${$file}{'revision'};
-			$filename = ${$file}{'filename'};
-			$binary = ${$file}{'binary'} ? 1 : 0;
+			my ($revision, $filename, $binary) = 
+				(
+					${$file}{'revision'},
+					${$file}{'filename'},
+					${$file}{'binary'} ? 1 : 0,
+					undef
+				);
 
 			if (!defined $revisions{$filename})
 			{
-				if ($revision eq 'dead')
-				{
-					# skip file that was initially committed to other branch
-					next;
-				}
+				# ignore file originally commited on another branch
+				next if $revision eq 'dead';
 
-				# new file, push it to git_add and set (prev_)revision(s)
-				$commitstr{$filename} = "\t$filename: initial version ($revision)\n";
-				my $stat = stat($filename);
-				if (defined $stat)
-				{
-					$file_mode = $stat->mode & 0777;
-				}
-				else
-				{
-					# File do not exist (anymore), use some default moode
-					$file_mode = 0644;
-				}
+				# new file, set revision
 
-				$revisions{$filename} = "1.0";
-				$squashed->{'files'}->{$filename} = [ "1.0", $binary ] if ($squashed);
+				$revisions{$filename} = $revision;
+				$commitobj->{'added'}->{$filename} = [ $revision, $binary ];
+				$squashed->{'files'}->{$filename} = [ $revision, $binary ] if ($squashed);
 			}
 			elsif ($revision eq 'dead')
 			{
-				if (!defined $commitstr{$filename})
-				{
-					push @git_remove, $filename;
-					$commitstr{$filename} = "\t$filename: $revisions{$filename} deleted\n";
-				}
-				else
-				{
-					do_command(['rm', $filename], $debug);
-				}
-
-				# Skip the following cvs add and cvs update operations
+				# file has been deleted
+				$commitobj->{'removed'}->{$filename} = $revisions{$filename};
 				delete $revisions{$filename};
 				delete $squashed->{'files'}->{$filename} if ($squashed);
-				next;
 			}
 			else
 			{
 				# update commit string for file update only
-				$commitstr{$filename} = "\t$filename: $revisions{$filename} -> $revision\n";
+				$revisions{$filename} = $revision;
+				$commitobj->{'updated'}->{$filename} = [ $revision, $binary ];
+				$squashed->{'files'}->{$filename} = [ $revision, $binary ] if ($squashed);
 			}
 
-			# update revision for current file
-			$revisions{$filename} = $revision;
-			$squashed->{'files'}->{$filename}->[0] = $revision if ($squashed);
-
-			if ($epoch > $squash_date)
-			{
-				cvs2git($filename, $revision, $gitdir,
-						$file_mode, $binary, $debug);
-			}
-		}
-
-		foreach my $filename (sort (keys %commitstr))
-		{
-			$commitstr .= $commitstr{$filename};
 		}
 
 		if ($epoch > $squash_date)
 		{
-			$env = build_env_hash($date, $author, $mail);
-			cd($gitdir);
-			foreach my $a (@git_remove)
-			{
-				do_command(['git', 'rm', '-f', $a], $debug);
-			}
-
-			do_command(['git', 'add', '.'], $debug);
-			write_file($tmpfile, $commitstr);
-			do_command(['git', 'commit', '-F', "$tmpfile"], $debug, undef, $env);
-
+			create_regular_commit($commitobj, $cvsdir, $gitdir, $tmpfile, $debug);
 			++$commitno;
 		}
 
 		return $commitno if $end && $i == $end;
-		cd($cvsdir);
 	}
-	# all commits get squashed!
+
+	# all commits need to get squashed!
 	create_squash_commit($squashed, $cvsdir, $gitdir, $tmpfile, $debug) if ($squashed);
 
 	unlink($tmpfile);
@@ -954,7 +970,7 @@ sub parse_opts()
 
 	if (defined $opts->{'dryrun'})
 	{
-		$opts->{'debug'} = 2;
+		$opts->{'debug'} += 2;
 		delete $opts->{'dryrun'};
 	}
 	$opts->{'debug'} = 0 if !defined $opts->{'debug'};
@@ -978,7 +994,6 @@ sub main()
 	$count = parse_commit_log('cvs log -r1 2>/dev/null',
 							  $opts{'removeprefix'},
 							  $opts{'allowunknown'},
-							  $opts{'debug'},
 							  \%commits);
 	#print Data::Dumper->Dump([\%commits], [qw/foo/]);
 	#exit;
