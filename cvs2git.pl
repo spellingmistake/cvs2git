@@ -918,6 +918,7 @@ sub parse_opts()
 				'dry-run'         => \$opts->{'dryrun'},
 				'debug'           => \$opts->{'debug'},
 				'help'            => \$opts->{'help'})
+				# TODO update mode and wildcards for binary file detection
 	};
 
 	chomp ($args = $@) if $@;
