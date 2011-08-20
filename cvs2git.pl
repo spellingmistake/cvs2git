@@ -30,6 +30,7 @@ Usage: $0 --cvsdir <cvs_dir> --gitdir <git_dir>
           [--squashdate <date up to which commits will be squashed>]
           [--finisher <scriptlet>] [--remove-prefix <prefix>]
           [--debug] [--dry-run] [--allow-unknown] [--help]
+          [--force-binary]
 
 Convert CVS component in directory cvs-directory and store all commits
 in git_directory.
@@ -70,6 +71,11 @@ but to keep running modifying the commit message a little.
 
 Use --dry-run to see what the script would do (except for retrieval of the
 CVS commit log)
+
+Use --force-binary to force all files to be treated as binary files. In
+for CVS keyword substitution had to be explicitely disabled for binary
+files. Most repositories contain binary files that were not added with
+the -kb switch. This options treats all files as if they were binary.
 
 the --debug option does print the commands executed on STDOUT
 
@@ -242,12 +248,13 @@ sub BUILD_COMMIT_LOG() { return 8; }
 # in:  cmd           command to execute for cvs log (e.g. a cat command)       #
 #      prefix        prefix to remove from cvs path                            #
 #      allow         allow unknown authors                                     #
+#      forcebinary   set binary flag on all files                              #
 #      commits       hash ref to store results in                              #
 # out: number of commits                                                       #
 ################################################################################
 sub parse_commit_log($$$$%)
 {
-	my ($cmd, $prefix, $allow, $commits) = @_;
+	my ($cmd, $prefix, $allow, $forcebinary, $commits) = @_;
 	my ($state, $infos, $tags, $count, $buf, $rest, %unknown_authors);
 
 	$state = START;
@@ -295,6 +302,7 @@ sub parse_commit_log($$$$%)
 					undef $tags;
 					$infos->{'filename'} = $1;
 					$infos->{'filename'} =~ s|/Attic/|/|;
+					$infos->{'binary'} = 1 if $forcebinary;
 					if (defined $prefix and 0 == $infos->{'filename'} =~ s/\Q$prefix\E//o)
 					{
 						die "prefix '$prefix' not found in '$infos->{'filename'}"
@@ -915,6 +923,7 @@ sub parse_opts()
 				'finisher=s'      => \$opts->{'finisher'},
 				'allow-unknown'   => \$opts->{'allowunknown'},
 				'remove-prefix=s' => \$opts->{'removeprefix'},
+				'force-binary'    => \$opts->{'forcebinary'},
 				'dry-run'         => \$opts->{'dryrun'},
 				'debug'           => \$opts->{'debug'},
 				'help'            => \$opts->{'help'})
