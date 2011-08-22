@@ -2,7 +2,6 @@
 
 use strict;
 use warnings;
-use Cwd qw(cwd);
 use Data::Dumper qw(Dumper);
 use Date::Format;
 use Date::Parse;
