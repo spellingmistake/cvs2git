@@ -29,7 +29,7 @@ Usage: $0 --cvsdir <cvs_dir> --gitdir <git_dir>
           [--squashdate <date up to which commits will be squashed>]
           [--finisher <scriptlet>] [--remove-prefix <prefix>]
           [--debug] [--dry-run] [--allow-unknown] [--help]
-          [--force-binary]
+          [--force-binary] [--update]
 
 Convert CVS component in directory cvs-directory and store all commits
 in git_directory.
@@ -133,11 +133,13 @@ sub build_env_hash($$$;$)
 # in:  commits - ref to commits hash                                           #
 #      rinfos  - ref to file info hash (will be wiped except for the filename) #
 #      count   - ref to number of commits, gets increased for a new one        #
+#      update  - date to use with update option, means all commits prior and   #
+#                up to this epoch value are not included in commit hash        #
 # out: filename                                                                #
 ################################################################################
-sub populate_commit_hash(%$$)
+sub populate_commit_hash(%$$$)
 {
-	my ($commits, $rinfos, $count) = @_;
+	my ($commits, $rinfos, $count, $update) = @_;
 	my (@commit_tags, $commit_tag, $epoch, $filename);
 
 	if ($$rinfos->{'curr'}->{'rev'} !~ /^[0-9]+\.[0-9]+$/)
@@ -146,6 +148,7 @@ sub populate_commit_hash(%$$)
 		delete $$rinfos->{'curr'};
 		return;
 	}
+	return if ($update and $update > $$rinfos->{'curr'}->{'epoch'});
 
 	my $infos = $$rinfos;
 	$infos->{'curr'}->{'rev'} = 'dead' if ($infos->{'curr'}->{'state'} eq 'dead');
@@ -248,12 +251,13 @@ sub BUILD_COMMIT_LOG() { return 8; }
 #      prefix        prefix to remove from cvs path                            #
 #      allow         allow unknown authors                                     #
 #      forcebinary   set binary flag on all files                              #
+#      update        date to use with update options                           #
 #      commits       hash ref to store results in                              #
 # out: number of commits                                                       #
 ################################################################################
 sub parse_commit_log($$$$%)
 {
-	my ($cmd, $prefix, $allow, $forcebinary, $commits) = @_;
+	my ($cmd, $prefix, $allow, $forcebinary, $update, $commits) = @_;
 	my ($state, $infos, $tags, $count, $buf, $rest, %unknown_authors);
 
 	$state = START;
@@ -389,13 +393,13 @@ sub parse_commit_log($$$$%)
 			{
 				if ($line eq ('-' x 28))
 				{
-					populate_commit_hash($commits, \$infos, \$count);
+					populate_commit_hash($commits, \$infos, \$count, $update);
 					$state = SKIP_TO_REVISION;
 				}
 				elsif($line eq ('=' x 77))
 				{
 					# last revision for file
-					populate_commit_hash($commits, \$infos, \$count);
+					populate_commit_hash($commits, \$infos, \$count, $update);
 					$state = INITIAL;
 
 				}
@@ -937,6 +941,7 @@ sub parse_opts()
 				'remove-prefix=s' => \$opts->{'removeprefix'},
 				'force-binary'    => \$opts->{'forcebinary'},
 				'dry-run'         => \$opts->{'dryrun'},
+				'update'          => \$opts->{'update'},
 				'debug'           => \$opts->{'debug'},
 				'help'            => \$opts->{'help'})
 				# TODO update mode and wildcards for binary file detection
@@ -997,6 +1002,13 @@ sub parse_opts()
 	}
 	$opts->{'debug'} = 0 if !defined $opts->{'debug'};
 
+	if ($opts->{'update'})
+	{
+		do_command(['git', '--git-dir', "$opts->{'gitdir'}/.git", 'log',
+				   '-n1', '--pretty="format:%ct"', 'HEAD'],
+				   ($opts->{'debug'} & (~2)), \$opts->{'update'}) and die "You suck!";
+	}
+
 	return %$opts;
 }
 
@@ -1010,12 +1022,14 @@ sub main()
 		$component = $1;
 		print "Converting component $component in directory $opts{'cvsdir'}\n";
 	}
-	$opts{'removeprefix'}.= "$component/" if (defined $component);
+	$opts{'removeprefix'} .= "$component/" if (defined $component);
 
 	cd($opts{'cvsdir'});
 	$count = parse_commit_log('cvs log -r1 2>/dev/null',
 							  $opts{'removeprefix'},
 							  $opts{'allowunknown'},
+							  $opts{'forcebinary'},
+							  $opts{'update'},
 							  \%commits);
 	#print Data::Dumper->Dump([\%commits], [qw/foo/]);
 	#exit;
