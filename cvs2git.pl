@@ -442,10 +442,11 @@ sub cd($)
 # in:  command  - command to execute (must be an array ref)                    #
 #      debug    - 1 == debug, 2 == dry-run                                     #
 #      filename - optional filename to use for STDOUT redirection              #
+#                 use a scalar reference to direct STDOUT to this variable     #
 #      environ  - environment to use with command                              #
 # out: 0 on success, 1 otherwise                                               #
 ################################################################################
-sub do_command($;$$$)
+sub do_command($;$$$$)
 {
 	my ($cmd, $debug, $filename, $environ) = @_;
 
@@ -466,7 +467,19 @@ sub do_command($;$$$)
 	}
 	return 0 if 2 & $debug;
 
-	if ($filename)
+	if ($filename and "SCALAR" eq (ref $filename))
+	{
+		${$filename} = "";
+		$cmd = (join ' ', @{$cmd}) . " 2>/dev/null |";
+		open C, $cmd or die "unable to execute '$cmd'";
+		while (<C>)
+		{
+			${$filename} .= $_;
+		}
+		close C;
+		return $?;
+	}
+	elsif ($filename)
 	{
 		my ($file, $pid);
 
