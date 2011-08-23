@@ -148,7 +148,7 @@ sub populate_commit_hash(%$$$)
 		delete $$rinfos->{'curr'};
 		return;
 	}
-	return if ($update and $update > $$rinfos->{'curr'}->{'epoch'});
+	return if ($update and $update >= $$rinfos->{'curr'}->{'epoch'});
 
 	my $infos = $$rinfos;
 	$infos->{'curr'}->{'rev'} = 'dead' if ($infos->{'curr'}->{'state'} eq 'dead');
