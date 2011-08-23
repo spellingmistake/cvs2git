@@ -1005,7 +1005,7 @@ sub parse_opts()
 	if ($opts->{'update'})
 	{
 		do_command(['git', '--git-dir', "$opts->{'gitdir'}/.git", 'log',
-				   '-n1', '--pretty="format:%ct"', 'HEAD'],
+				   '-n1', '--pretty="format:%at"', 'HEAD'],
 				   ($opts->{'debug'} & (~2)), \$opts->{'update'}) and die "You suck!";
 	}
 
