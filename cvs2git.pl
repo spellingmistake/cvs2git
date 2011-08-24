@@ -33,6 +33,8 @@ use Getopt::Long;
 use IO::File;
 use IO::File qw();
 use POSIX qw(dup2);
+use IPC::Open3;
+use Symbol;
 
 my %authors = (
 	'wasi'      => [ 'Thomas Egerer',      'thomas.washeim@gmx.net' ],
@@ -459,19 +461,38 @@ sub cd($)
 }
 
 ################################################################################
-# do_command - execute command with optional redirection of output into file   #
+# do_command - execute command with optional redirection of stdout and stderr  #
+#              into a file or variable                                         #
 # in:  command  - command to execute (must be an array ref)                    #
+#      out      - where to direct stdout and stderr, must be a hash ref;       #
+#                 'stderr'/'stdout' define where the appropriate output goes:  #
+#                 use a SCALAR ref to get the output to a variable, if value   #
+#                 is no ref, output goes to the given string interpreted as a  #
+#                 file; if any of the values is ommited output goes nowhere    #
 #      debug    - 1 == debug, 2 == dry-run                                     #
-#      filename - optional filename to use for STDOUT redirection              #
-#                 use a scalar reference to direct STDOUT to this variable     #
 #      environ  - environment to use with command                              #
 # out: 0 on success, 1 otherwise                                               #
 ################################################################################
-sub do_command($;$$$$)
+sub do_command($%;$$)
 {
-	my ($cmd, $debug, $filename, $environ) = @_;
+	my ($cmd, $out, $debug, $environ) = @_;
+	my ($stderr, $stdout, $pid);
 
-	$cmd or die "Invalid commmand parameter";
+	if ($debug & 1)
+	{
+		local $" = " ";
+		print "@{$cmd}";
+		if ($out->{'stderr'} and "" eq ref($out->{'stderr'}))
+		{
+			print(" 2>" . $out->{'stderr'});
+		}
+		if ($out->{'stdout'} and "" eq ref($out->{'stdout'}))
+		{
+			print(" >"  . $out->{'stdout'});
+		}
+		print "\n";
+	}
+	return 0 if 2 & $debug;
 
 	if (defined $environ)
 	{
@@ -481,60 +502,37 @@ sub do_command($;$$$$)
 		}
 	}
 
-	if ($debug & 1)
+	if ($out->{'stdout'} and "" eq (ref $out->{'stdout'}))
 	{
-		local $" = " ";
-		print("@{$cmd}" . ($filename ? " -> $filename\n" : "\n"));
+		open C, ">$out->{'stdout'}";
+		$stdout = ">&C";
+		delete $out->{'stdout'};
 	}
-	return 0 if 2 & $debug;
-
-	if ($filename and "SCALAR" eq (ref $filename))
+	if ($out->{'stderr'} and "" eq (ref $out->{'stderr'}))
 	{
-		${$filename} = "";
-		$cmd = (join ' ', @{$cmd}) . " 2>/dev/null |";
-		open C, $cmd or die "unable to execute '$cmd'";
-		while (<C>)
-		{
-			${$filename} .= $_;
-		}
-		close C;
-		return $?;
+		open C, ">$out->{'stderr'}";
+		$stderr = ">&C";
+		delete $out->{'stderr'};
 	}
-	elsif ($filename)
+	$stderr = gensym if !defined $stderr;
+	$cmd = (join ' ', @{$cmd});
+	$pid = open3(undef, $stdout, $stderr, $cmd);
+
+	waitpid($pid, 0);
+
+	if (defined $out->{'stdout'})
 	{
-		my ($file, $pid);
-
-		$file = IO::File->new($filename, 'w') or die "Failed to write to file: $!";
-		$pid = fork();
-
-		if (0 == $pid)
-		{
-			dup2(fileno($file), 1);
-			exec (@{$cmd});
-			die "cmd failed";
-		}
-		elsif ($pid > 0)
-		{
-			waitpid($pid, 0);
-			if ($? != 0)
-			{
-				# TODO catch errors about anon cvs user here!
-				#die "Command returned error code $pid\n";
-				return 1;
-			}
-			$file->close;
-		}
-		else
-		{
-			die "Fork failed with: $!";
-		}
+		${$out->{'stdout'}} .= $_ while (<$stdout>);
 	}
-	else
+	if (defined $out->{'stderr'})
 	{
-		system(@{$cmd}) == 0 or warn "Failed to run command: $?";
+		${$out->{'stderr'}} .= $_ while (<$stderr>);
 	}
 
-	return 0;
+	close $stdout;
+	close $stderr;
+
+	$? >> 8;
 }
 
 ################################################################################
@@ -658,7 +656,7 @@ sub cvs2git($$$$$$) {
 		do
 		{
 			$ret = do_command(['cvs', 'update', '-p', '-r', $revision, $filename],
-							  $debug, $file);
+							  { 'stdout' =>  $file }, $debug);
 		} while ($ret == 1);
 	}
 	else
@@ -666,7 +664,7 @@ sub cvs2git($$$$$$) {
 		do
 		{
 			$ret = do_command(['cvs', 'update', '-r', $revision, $filename],
-							  $debug);
+							  { 'stdout' =>  $file }, $debug);
 		} while ($ret == 1);
 
 		print "cp $filename $file\n" if $debug & 1;
@@ -738,9 +736,9 @@ EOF
 		cvs2git($filename, $revision, $gitdir, 1, $binary, $debug);
 	}
 	cd($gitdir);
-	do_command(['git', 'add', '.'], $debug);
+	do_command(['git', 'add', '.'], {}, $debug);
 	write_file($tmpfile, $commitstr);
-	do_command(['git', 'commit', '-F', "$tmpfile"], $debug, undef, $env);
+	do_command(['git', 'commit', '-F', "$tmpfile"], {}, $debug, $env);
 	cd($cvsdir);
 }
 
@@ -792,12 +790,12 @@ EOF
 	cd($gitdir);
 	foreach my $filename (sort(keys %{$commitobj->{'removed'}}))
 	{
-		do_command(['git', 'rm', '-f', $filename], $debug);
+		do_command(['git', 'rm', '-f', $filename], {}, $debug);
 		$commitstr .= "\tremoved:  $filename\n"
 	}
-	do_command(['git', 'add', '.'], $debug);
+	do_command(['git', 'add', '.'], {}, $debug);
 	write_file($tmpfile, $commitstr);
-	do_command(['git', 'commit', '-F', "$tmpfile"], $debug, undef, $env);
+	do_command(['git', 'commit', '-F', "$tmpfile"], {}, $debug, $env);
 	cd($cvsdir);
 }
 
@@ -1021,9 +1019,11 @@ sub parse_opts()
 
 	if ($opts->{'update'})
 	{
+		delete $opts->{'update'};
 		do_command(['git', '--git-dir', "$opts->{'gitdir'}/.git", 'log',
 				   '-n1', '--pretty="format:%at"', 'HEAD'],
-				   ($opts->{'debug'} & (~2)), \$opts->{'update'}) and die "You suck!";
+				   { 'stdout' => \$opts->{'update'} },
+				   ($opts->{'debug'} & (~2))) and die "You suck!";
 	}
 
 	return %$opts;
