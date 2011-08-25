@@ -676,7 +676,7 @@ sub cvs2git($$$$$$) {
 		my $stat = stat($filename);
 		my $mode = defined $stat ? $stat->mode & 0777 : 0644;
 
-		print "chmod $mode $file\n" if $debug & 1;
+		printf("chmod %o $file\n", $mode) if $debug & 1;
 
 		if (!($debug & 2))
 		{
