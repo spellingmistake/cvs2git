@@ -207,12 +207,11 @@ sub populate_commit_hash(%$$$)
 
 	if (!exists $commits->{$commit_tag})
 	{
-		# TODO remove, it's redundant and for debugging only
 		chomp (my $date = ctime($epoch));
 		$commits->{$commit_tag} =
 		{
 			'comment'  => join("\n", @{$infos->{'curr'}->{'comment'}}),
-			'date'     => $date,
+			#'date'     => $date,
 		};
 
 		print "\rProcessed commit " . ++$$count;
@@ -638,13 +637,13 @@ sub trim_comment($)
 # in:  filename - filename of the CVS file to copy to git                      #
 #      revision - revision of the CVS file to use with update                  #
 #      gitdir   - git directory to use for file                                #
-#      param    - TODO                                                         #
+#      chmod    - perform a chmod operation on the file                        #
 #      binary   - is this a binary file?                                       #
 #      debug    - 1 == debug, 2 == dry-run                                     #
 # out: number of commits done                                                  #
 ################################################################################
 sub cvs2git($$$$$$) {
-	my ($filename, $revision, $gitdir, $param, $binary, $debug) = @_;
+	my ($filename, $revision, $gitdir, $chmod, $binary, $debug) = @_;
 	my ($file, $cmd, $ret);
 
 	$file = "$gitdir/$filename";
@@ -671,7 +670,7 @@ sub cvs2git($$$$$$) {
 		copy($filename, $file) if !($debug & 2);
 	}
 
-	if ($param)
+	if ($chmod)
 	{
 		my $stat = stat($filename);
 		my $mode = defined $stat ? $stat->mode & 0777 : 0644;
@@ -959,7 +958,8 @@ sub parse_opts()
 				'update'          => \$opts->{'update'},
 				'debug'           => \$opts->{'debug'},
 				'help'            => \$opts->{'help'})
-				# TODO update mode and wildcards for binary file detection
+				# TODO patterns for binary file detection and ignore list
+				# read authors from file
 	};
 
 	chomp ($args = $@) if $@;
