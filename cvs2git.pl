@@ -649,7 +649,7 @@ sub cvs2git($$$$$$) {
 
 	$file = "$gitdir/$filename";
 	print "mkdir ${\(dirname($file))}\n" if $debug & 1;
-	mkpath(dirname($file)) if !$debug & 2;
+	mkpath(dirname($file)) if !($debug & 2);
 
 	if (!$binary)
 	{
@@ -668,7 +668,7 @@ sub cvs2git($$$$$$) {
 		} while ($ret == 1);
 
 		print "cp $filename $file\n" if $debug & 1;
-		copy($filename, $file) if !$debug & 2;
+		copy($filename, $file) if !($debug & 2);
 	}
 
 	if ($param)
@@ -678,7 +678,7 @@ sub cvs2git($$$$$$) {
 
 		print "chmod $mode $file\n" if $debug & 1;
 
-		if (!$debug & 2)
+		if (!($debug & 2))
 		{
 			chmod $mode, $file or die "Failed to chmod file '$file': $!";
 		}
