@@ -470,7 +470,7 @@ sub cd($)
 #                 file; if any of the values is ommited output goes nowhere    #
 #      debug    - 1 == debug, 2 == dry-run                                     #
 #      environ  - environment to use with command                              #
-# out: 0 on success, 1 otherwise                                               #
+# out: return code of the process run                                          #
 ################################################################################
 sub do_command($%;$$)
 {
@@ -960,6 +960,7 @@ sub parse_opts()
 				'help'            => \$opts->{'help'})
 				# TODO patterns for binary file detection and ignore list
 				# read authors from file
+				# perform an actual update for CVS repo in case of update
 	};
 
 	chomp ($args = $@) if $@;
