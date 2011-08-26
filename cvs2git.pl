@@ -644,28 +644,26 @@ sub trim_comment($)
 ################################################################################
 sub cvs2git($$$$$$) {
 	my ($filename, $revision, $gitdir, $chmod, $binary, $debug) = @_;
-	my ($file, $cmd, $ret);
+	my ($file, $cmd, $out, $ret, $stderr);
 
 	$file = "$gitdir/$filename";
 	print "mkdir ${\(dirname($file))}\n" if $debug & 1;
 	mkpath(dirname($file)) if !($debug & 2);
 
-	if (!$binary)
-	{
-		do
-		{
-			$ret = do_command(['cvs', 'update', '-p', '-r', $revision, $filename],
-							  { 'stdout' =>  $file }, $debug);
-		} while ($ret == 1);
-	}
-	else
-	{
-		do
-		{
-			$ret = do_command(['cvs', 'update', '-r', $revision, $filename],
-							  { 'stdout' =>  $file }, $debug);
-		} while ($ret == 1);
+	$cmd = ['cvs', 'update', ($binary ? '' : '-p'), '-r', $revision, $filename];
+	$out = { 'stderr' =>  \$stderr };
+	$out->{'stdout'} = $file if !$binary;
 
+	# this loop is required to catch errors that sometimes occur with CVS
+	# whie updating files
+	do {
+		$ret = do_command($cmd, $out, $debug);
+	} while ($ret and $out->{'stderr'} =~ /anoncvs_.*?: no such system user/);
+	die "error: $stderr" if ($ret);
+
+	# binary files are sticky, we have to copy them
+	if ($binary)
+	{
 		print "cp $filename $file\n" if $debug & 1;
 		copy($filename, $file) if !($debug & 2);
 	}
