@@ -1042,6 +1042,14 @@ sub main()
 	$opts{'removeprefix'} .= "$component/" if (defined $component);
 
 	cd($opts{'cvsdir'});
+	if ($opts{'update'})
+	{
+		my ($stderr, $ret);
+		$ret = do_command([ 'cvs', 'up' ], { 'stderr' => \$stderr },
+						  $opts{'debug'});
+		die "Error performing cvs update command: $stderr" if $ret;
+	}
+
 	$count = parse_commit_log('cvs log -r1 2>/dev/null',
 							  $opts{'removeprefix'},
 							  $opts{'allowunknown'},
