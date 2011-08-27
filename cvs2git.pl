@@ -57,6 +57,7 @@ Convert CVS component in directory cvs_dir and store all commits in git_dir.
     --maxcommits <number>     stop conversion after <number> of commits
     --squashdate <date>       squash all commits up to <date> into a single one
     --finisher <scriptlet>    scriptlet to be executed after conversion process
+    --binfiles <regexp>       treat files matching <regexp> as binary files
     --debug                   be verbose about what script is doing
     --dry-run                 simulate the conversion process
     --no-unknown              do not allow unknown authors
@@ -109,6 +110,9 @@ The options --finisher <scriptlet> causes <scriptlet> to be executed after
 the conversion has been performed in <git_dir>. It can be used to perform
 git repacking or running git filter-branch. It is called with cvs_dir,
 git_dir and number of commits as arguments.
+
+All files matching the <regexp> given with --binfiles are treated to be
+binary, see --force-binary.
 
 Use --debug to see (almost) everything the script is doing during the
 conversion.
@@ -295,15 +299,25 @@ sub BUILD_COMMIT_LOG() { return 8; }
 # in:  cmd           command to execute for cvs log (e.g. a cat command)       #
 #      prefix        prefix to remove from cvs path                            #
 #      noallow       allow unknown authors                                     #
-#      forcebinary   set binary flag on all files                              #
 #      update        date to use with update options                           #
+#      binary        hash ref { 'all'/'regexp' } to set binary flag on all     #
+#                    files/those matching regexp                               #
 #      commits       hash ref to store results in                              #
 # out: number of commits                                                       #
 ################################################################################
-sub parse_commit_log($$$$%)
+sub parse_commit_log($$$$%%)
 {
-	my ($cmd, $prefix, $noallow, $forcebinary, $update, $commits) = @_;
-	my ($state, $infos, $tags, $count, $buf, $rest, %unknown_authors);
+	my ($cmd, $prefix, $noallow, $update, $binary, $commits) = @_;
+	my ($state, $infos, $tags, $count, $buf, $rest, $forcebinary, $regexp, %unknown_authors);
+
+	#print Data::Dumper->Dump([$binary], [qw/foo/]);
+	#exit;
+
+	if (defined $binary)
+	{
+		$forcebinary = $binary->{'all'};
+		$regexp = $binary->{'regexp'};
+	}
 
 	$state = START;
 	$count = 0;
@@ -350,7 +364,10 @@ sub parse_commit_log($$$$%)
 					undef $tags;
 					$infos->{'filename'} = $1;
 					$infos->{'filename'} =~ s|/Attic/|/|;
-					$infos->{'binary'} = 1 if $forcebinary;
+					if ($forcebinary or defined $regexp and $infos->{'filename'} =~ /$regexp/)
+					{
+						$infos->{'binary'} = 1;
+					}
 					if (defined $prefix and 0 == $infos->{'filename'} =~ s/\Q$prefix\E//o)
 					{
 						die "prefix '$prefix' not found in '$infos->{'filename'}"
@@ -976,6 +993,7 @@ sub parse_opts()
 				'maxcommits=i'    => \$opts->{'maxcommits'},
 				'squashdate=s'    => \$opts->{'squashdate'},
 				'finisher=s'      => \$opts->{'finisher'},
+				'binfiles=s'      => \$opts->{'binfiles'},
 				'no-unknown'      => \$opts->{'nounknown'},
 				'prefix=s'        => \$opts->{'prefix'},
 				'force-binary'    => \$opts->{'forcebinary'},
@@ -984,9 +1002,7 @@ sub parse_opts()
 				'debug'           => \$opts->{'debug'},
 				'help'            => \$opts->{'help'},
 				'longhelp'        => \$opts->{'longhelp'})
-				# TODO patterns for binary file detection and ignore list
-				# read authors from file
-				# perform an actual update for CVS repo in case of update
+				# TODO ignore list read authors from file
 	};
 
 	chomp ($args = $@) if $@;
@@ -1041,6 +1057,15 @@ sub parse_opts()
 	}
 	$opts->{'debug'} = 0 if !defined $opts->{'debug'};
 
+	if (defined $opts->{'forcebinary'})
+	{
+		$opts->{'forcebinary'} = { 'all' => 1 };
+	}
+	elsif (defined $opts->{'binfiles'})
+	{
+		$opts->{'forcebinary'} = { 'regexp' => $opts->{'binfiles'} };
+	}
+
 	if ($opts->{'update'})
 	{
 		delete $opts->{'update'};
@@ -1077,8 +1102,8 @@ sub main()
 	$count = parse_commit_log('cvs log -r1 2>/dev/null',
 							  $opts{'prefix'},
 							  $opts{'nounknown'},
-							  $opts{'forcebinary'},
 							  $opts{'update'},
+							  $opts{'forcebinary'},
 							  \%commits);
 	#print Data::Dumper->Dump([\%commits], [qw/foo/]);
 	#exit;
