@@ -40,32 +40,59 @@ my %authors = (
 	'wasi'      => [ 'Thomas Egerer',      'thomas.washeim@gmx.net' ],
 );
 
-sub help()
+sub help($;$)
 {
-	die <<EOF;
-Usage: $0 --cvsdir <cvs_dir> --gitdir <git_dir>
-          [--maxcommits <max number of commits>]
-          [--squashdate <date up to which commits will be squashed>]
-          [--finisher <scriptlet>] [--remove-prefix <prefix>]
-          [--debug] [--dry-run] [--allow-unknown] [--help]
-          [--force-binary] [--update]
+	my ($err, $long) = @_;
+	my $ret = defined $err ? -1 : 0;
 
-Convert CVS component in directory cvs-directory and store all commits
-in git_directory.
+	print $err if defined $err;
+	print <<EOF;
+usage: $0 --cvsdir <cvs_dir> --gitdir <git_dir> [<options>]
 
-cvs_directory is a working directory holding the component to convert
-and must be updated prior to running this script.
+Convert CVS component in directory cvs_dir and store all commits in git_dir.
 
-git_directory must exist and a 'git init' must have been run. New
-commits will be appended to the current branch, so best create a new
-empty branch in the general case.
+    --cvsdir <cvs_dir>        CVS source directory to use in conversion
+    --gitdir <git_dir>        git destination directory (must exist)
+    --prefix <prefix>         prefix to cut off from CVS path
+    --maxcommits <number>     stop conversion after <number> of commits
+    --squashdate <date>       squash all commits up to <date> into a single one
+    --finisher <scriptlet>    scriptlet to be executed after conversion process
+    --debug                   be verbose about what script is doing
+    --dry-run                 simulate the conversion process
+    --no-unknown              do not allow unknown authors
+    --force-binary            force binary conversion mode on all files
+    --update                  update a repository already converted
+    --help                    display this help text
+    --longhelp                display more verbose help information
+EOF
 
-optional parameter maxcommits can be set a positive value to indicate
-maximum number of commits to process.
+exit $ret unless (defined $long);
 
-optional parameter squashdate can be set to a date to indicate that all
-files committed before that date will be squashed into in big commit.
-below is a list known to be understood by squashdate:
+print <<EOF;
+NOTES:
+cvs_dir is a working directory holding the component to convert. It
+must exist and should be up to date when starting the conversion
+process. The option --update causes a 'cvs up' to be executed prior
+to the conversion.
+
+git_dir must exist a 'git init' must not necessarily have been run
+in this directory. Commits will be appended to the current branch,
+so if you're using the --update option be sure you are in the branch
+which is meant to be the one updated.
+
+The string given with --prefix concatenated with the name of the
+cvs_dir is removed from the beginning of each RCS file. So with
+'--cvsdir fnord --prefix /cvsroot/fnord' /cvsroot/fnord/fnord is to
+be removed from a RCS file. If the string given here is not found
+in the RCS file path the script terminates.
+
+Use --maxcommits to only perform conversion of the first <number> of CVS
+commits. If you use it with --squashdate you might end up with no conversion
+at all if all of the first <number> of commits are before <date>.
+
+Use --squashdate to squash all CVS commits up to and including <date> into
+one commit. Below is a list of date formats known to be understood by
+--squashdate:
 	1995:01:24T09:08:17.1823213           ISO-8601
 	1995-01-24T09:08:17.1823213
 	Wed, 16 Jun 94 07:29:35 CST           Comma and day name are optional
@@ -78,29 +105,29 @@ below is a list known to be understood by squashdate:
 	1999 10:02:18 "GMT"
 	16 Nov 94 22:28:20 PST
 
-the optional parameter finisher specifies a script run in gitdir, after
-the conversion process is (almost) finished; it can be used to issue
-filters etc; script is given cvsdir, gitdir and number of commits
-as command line arguments;
+The options --finisher <scriptlet> causes <scriptlet> to be executed after
+the conversion has been performed in <git_dir>. It can be used to perform
+git repacking or running git filter-branch. It is called with cvs_dir,
+git_dir and number of commits as arguments.
 
-the optional parameter allow-unknown allows for unknown authors (i.e.
-those not included in authors hash to not cause this program to fail
-but to keep running modifying the commit message a little.
+Use --debug to see (almost) everything the script is doing during the
+conversion.
 
-Use --dry-run to see what the script would do (except for retrieval of the
-CVS commit log)
+The --dry-run option simulates the conversion process without actually
+doing anything. You can use it with --debug to see what will be done during
+the conversion.
+
+The --no-unknown forces all authors to be known in the %authors hash. It
+can be used to get a commit log with complete author information for each
+author.
 
 Use --force-binary to force all files to be treated as binary files. In
 for CVS keyword substitution had to be explicitely disabled for binary
 files. Most repositories contain binary files that were not added with
 the -kb switch. This options treats all files as if they were binary.
-
-the --debug option does print the commands executed on STDOUT
-
-the optional parameter remove-prefix is the prefix to be removed from
-path and defaults to '/export/sina/cvs/components/tgz/'
-
 EOF
+
+exit $ret;
 }
 
 ################################################################################
@@ -267,7 +294,7 @@ sub BUILD_COMMIT_LOG() { return 8; }
 #                    in $commits ref;                                          #
 # in:  cmd           command to execute for cvs log (e.g. a cat command)       #
 #      prefix        prefix to remove from cvs path                            #
-#      allow         allow unknown authors                                     #
+#      noallow       allow unknown authors                                     #
 #      forcebinary   set binary flag on all files                              #
 #      update        date to use with update options                           #
 #      commits       hash ref to store results in                              #
@@ -275,7 +302,7 @@ sub BUILD_COMMIT_LOG() { return 8; }
 ################################################################################
 sub parse_commit_log($$$$%)
 {
-	my ($cmd, $prefix, $allow, $forcebinary, $update, $commits) = @_;
+	my ($cmd, $prefix, $noallow, $forcebinary, $update, $commits) = @_;
 	my ($state, $infos, $tags, $count, $buf, $rest, %unknown_authors);
 
 	$state = START;
@@ -379,7 +406,7 @@ sub parse_commit_log($$$$%)
 
 				if ($line =~ /author: (.*?);/)
 				{
-					$unknown_authors{$1} = 1 if (!defined $authors{$1} and !$allow);
+					$unknown_authors{$1} = 1 if (!defined $authors{$1} and $noallow);
 					$infos->{'curr'}->{'author'} = $1;
 				}
 
@@ -435,7 +462,7 @@ sub parse_commit_log($$$$%)
 		$rest = $buf;
 	}
 
-	if (!$allow && scalar keys %unknown_authors)
+	if ($noallow && scalar keys %unknown_authors)
 	{
 		my @unknown_authors = keys %unknown_authors;
 
@@ -932,8 +959,8 @@ sub create_commits(%$$$$$)
 #      - squashdate - date to which all commits will be squashed (optional)    #
 #      - finisher - finisher script to run after completion of conversion is   #
 #                   complete e.g. git-filter-branch (optional)                 #
-#      - allowunknown - do not abort if unknown authors were found (optional)  #
-#      - removeprefix - prefix to cut from files parsed in CVS log (optional)  #
+#      - nounknown - do not abort if unknown authors were found (optional)     #
+#      - prefix - prefix to cut from files parsed in CVS log (optional)        #
 ################################################################################
 sub parse_opts()
 {
@@ -949,13 +976,14 @@ sub parse_opts()
 				'maxcommits=i'    => \$opts->{'maxcommits'},
 				'squashdate=s'    => \$opts->{'squashdate'},
 				'finisher=s'      => \$opts->{'finisher'},
-				'allow-unknown'   => \$opts->{'allowunknown'},
-				'remove-prefix=s' => \$opts->{'removeprefix'},
+				'no-unknown'      => \$opts->{'nounknown'},
+				'prefix=s'        => \$opts->{'prefix'},
 				'force-binary'    => \$opts->{'forcebinary'},
 				'dry-run'         => \$opts->{'dryrun'},
 				'update'          => \$opts->{'update'},
 				'debug'           => \$opts->{'debug'},
-				'help'            => \$opts->{'help'})
+				'help'            => \$opts->{'help'},
+				'longhelp'        => \$opts->{'longhelp'})
 				# TODO patterns for binary file detection and ignore list
 				# read authors from file
 				# perform an actual update for CVS repo in case of update
@@ -965,22 +993,19 @@ sub parse_opts()
 
 	if ($args)
 	{
-		warn "There were warnings/errors parsing the command line:\n" .
-			 "\t$args\n\n";
-		help();
+		help("There were warnings/errors parsing the command line:\n\t$args\n\n");
 	}
-	elsif (!defined $opts->{'cvsdir'} or !defined $opts->{'gitdir'})
+
+	help(undef, $opts->{'longhelp'}) if $opts->{'help'} or $opts->{'longhelp'};
+
+	if (!defined $opts->{'cvsdir'} or !defined $opts->{'gitdir'})
 	{
-		warn "cvs- and git-dir are mandatory, please fix!\n\n";
-		help();
+		help("cvs- and git-dir are mandatory, please fix!\n\n");
 	}
 	elsif (defined $opts->{'finisher'} and not -x $opts->{'finisher'})
 	{
-		warn "finisher script '$opts->{'finisher'}' is not executable!\n\n";
-		help();
+		help("finisher script '$opts->{'finisher'}' is not executable!\n\n");
 	}
-
-	help() if $opts->{'help'};
 
 	$opts->{'cvsdir'} = rel2abs($opts->{'cvsdir'});
 	if (! -d $opts->{'cvsdir'} or ! -d "$opts->{'cvsdir'}/CVS")
@@ -1004,9 +1029,9 @@ sub parse_opts()
 	$opts->{'squashdate'} = defined $opts->{'squashdate'} ?
 		str2time($opts->{'squashdate'}) : 0;
 
-	if (defined $opts->{'removeprefix'})
+	if (defined $opts->{'prefix'})
 	{
-		$opts->{'removeprefix'} .= '/' if ($opts->{'removeprefix'} !~ m|/$|);
+		$opts->{'prefix'} .= '/' if ($opts->{'prefix'} !~ m|/$|);
 	}
 
 	if (defined $opts->{'dryrun'})
@@ -1038,7 +1063,7 @@ sub main()
 		$component = $1;
 		print "Converting component $component in directory $opts{'cvsdir'}\n";
 	}
-	$opts{'removeprefix'} .= "$component/" if (defined $component);
+	$opts{'prefix'} .= "$component/" if (defined $component);
 
 	cd($opts{'cvsdir'});
 	if ($opts{'update'})
@@ -1050,8 +1075,8 @@ sub main()
 	}
 
 	$count = parse_commit_log('cvs log -r1 2>/dev/null',
-							  $opts{'removeprefix'},
-							  $opts{'allowunknown'},
+							  $opts{'prefix'},
+							  $opts{'nounknown'},
 							  $opts{'forcebinary'},
 							  $opts{'update'},
 							  \%commits);
