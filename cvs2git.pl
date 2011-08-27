@@ -688,7 +688,7 @@ sub trim_comment($)
 ################################################################################
 sub cvs2git($$$$$$) {
 	my ($filename, $revision, $gitdir, $chmod, $binary, $debug) = @_;
-	my ($file, $cmd, $out, $ret, $stderr);
+	my ($file, $cmd, $out, $ret, $stderr, $maxerr);
 
 	$file = "$gitdir/$filename";
 	print "mkdir ${\(dirname($file))}\n" if $debug & 1;
@@ -700,9 +700,11 @@ sub cvs2git($$$$$$) {
 
 	# this loop is required to catch errors that sometimes occur with CVS
 	# whie updating files
+	$maxerr = 4;
 	do {
 		$ret = do_command($cmd, $out, $debug);
-	} while ($ret and $out->{'stderr'} =~ /anoncvs_.*?: no such system user/);
+		$maxerr--;
+	} while ($ret and $maxerr and $out->{'stderr'} =~ /anoncvs_.*?: no such system user/);
 	die "error: $stderr" if ($ret);
 
 	# binary files are sticky, we have to copy them
