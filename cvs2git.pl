@@ -251,7 +251,7 @@ sub populate_commit_hash(%$$$)
 			#'date'     => $date,
 		};
 
-		print "\rProcessed commit " . ++$$count;
+		print "\rProcessed CVS commit " . ++$$count;
 	}
 
 	my $hash =
@@ -489,7 +489,7 @@ sub parse_commit_log($$$$%%)
 	{
 		my @unknown_authors = keys %unknown_authors;
 
-		die "Unknown authors found:\n\t@unknown_authors,\nPlease fix!";
+		die "\nUnknown authors found:\n\t@unknown_authors,\nPlease fix!";
 	}
 
 	close C;
@@ -871,6 +871,12 @@ sub create_commits(%$$$$$)
 
 	$commitno = $i = 0;
 
+	if (!$debug)
+	{
+		select(STDOUT);
+		$| = 1;
+	}
+
 	if ($end)
 	{
 		print "Converting $end of the $count total commits\n";
@@ -878,7 +884,7 @@ sub create_commits(%$$$$$)
 	}
 	else
 	{
-		warn "Processing $count commits\n";
+		print "Converting $count commits\n";
 	}
 
 	foreach my $commit (sort keys %{$commits})
@@ -896,7 +902,7 @@ sub create_commits(%$$$$$)
 
 		if ($epoch <= $squashdate)
 		{
-			warn "Skipping commit ${\(++$i)}/$count\n";
+			print "${\($debug ? \"\n\" : \"\r\")}Skipping commit ${\(++$i)}/$count";
 			if (!$squashed)
 			{
 				# intialize squashed hash
@@ -908,7 +914,7 @@ sub create_commits(%$$$$$)
 		}
 		else
 		{
-			warn "Processing commit ${\(++$i)}/$count\n";
+			print "${\($debug ? \"\n\" : \"\r\")}Converting commit ${\(++$i)}/$count";
 			if ($squashed)
 			{
 				create_squash_commit($squashed, $cvsdir, $gitdir, $tmpfile,
@@ -968,7 +974,7 @@ sub create_commits(%$$$$$)
 			++$commitno;
 		}
 
-		return $commitno if $end && $i == $end;
+		goto END if $end && $i == $end;
 	}
 
 	# all commits need to get squashed!
@@ -978,6 +984,13 @@ sub create_commits(%$$$$$)
 							 $maxerr, $debug)
 	}
 
+END:
+	if (!$debug)
+	{
+		select(STDOUT);
+		$| = 0;
+		print "\n";
+	}
 	unlink($tmpfile);
 	return $commitno;
 }
