@@ -58,6 +58,7 @@ Convert CVS component in directory cvs_dir and store all commits in git_dir.
     --squashdate <date>       squash all commits up to <date> into a single one
     --finisher <scriptlet>    scriptlet to be executed after conversion process
     --binfiles <regexp>       treat files matching <regexp> as binary files
+    --maxcvserrs <number>     allow at most <number> of anoncvs errors per file
     --debug                   be verbose about what script is doing
     --dry-run                 simulate the conversion process
     --no-unknown              do not allow unknown authors
@@ -113,6 +114,11 @@ git_dir and number of commits as arguments.
 
 All files matching the <regexp> given with --binfiles are treated to be
 binary, see --force-binary.
+
+The option --maxcvserrs can be used to override the default of four
+anoncvs errors allowed per file when performing update operations as anon
+user on a CVS repo. Somehow this happened a lot during tests and was
+pretty annoying.
 
 Use --debug to see (almost) everything the script is doing during the
 conversion.
@@ -682,13 +688,14 @@ sub trim_comment($)
 #      revision - revision of the CVS file to use with update                  #
 #      gitdir   - git directory to use for file                                #
 #      chmod    - perform a chmod operation on the file                        #
+#      maxerr   - maximum number of anoncvs errors allowed for file            #
 #      binary   - is this a binary file?                                       #
 #      debug    - 1 == debug, 2 == dry-run                                     #
 # out: number of commits done                                                  #
 ################################################################################
-sub cvs2git($$$$$$) {
-	my ($filename, $revision, $gitdir, $chmod, $binary, $debug) = @_;
-	my ($file, $cmd, $out, $ret, $stderr, $maxerr);
+sub cvs2git($$$$$$$) {
+	my ($filename, $revision, $gitdir, $chmod, $binary, $maxerr, $debug) = @_;
+	my ($file, $cmd, $out, $ret, $stderr);
 
 	$file = "$gitdir/$filename";
 	print "mkdir ${\(dirname($file))}\n" if $debug & 1;
@@ -698,13 +705,11 @@ sub cvs2git($$$$$$) {
 	$out = { 'stderr' =>  \$stderr };
 	$out->{'stdout'} = $file if !$binary;
 
-	# this loop is required to catch errors that sometimes occur with CVS
-	# whie updating files
-	$maxerr = 4;
 	do {
+		print "error: '$stderr' ($maxerr)\n" if $maxerr < 4;
 		$ret = do_command($cmd, $out, $debug);
 		$maxerr--;
-	} while ($ret and $maxerr and $out->{'stderr'} =~ /anoncvs_.*?: no such system user/);
+	} while ($ret and $maxerr and $stderr =~ /anoncvs_.*?: no such system user/);
 	die "error: $stderr" if ($ret);
 
 	# binary files are sticky, we have to copy them
@@ -736,10 +741,11 @@ sub cvs2git($$$$$$) {
 #      cvsdir   - CVS directory to use                                         #
 #      gitdir   - git directory to use for file                                #
 #      tmpfile  - temporary file to use for git comment                        #
+#      maxerr   - maximum number of anoncvs errors allowed for file            #
 #      debug    - 1 == debug, 2 == dry-run                                     #
 ################################################################################
-sub create_squash_commit(%$$$$) {
-	my ($squashed, $cvsdir, $gitdir, $tmpfile, $debug) = @_;
+sub create_squash_commit(%$$$$$) {
+	my ($squashed, $cvsdir, $gitdir, $tmpfile, $maxerr, $debug) = @_;
 	my ($commitstr, $env, $filename, $binary, $only, $authors, $count);
 
 	$commitstr = <<EOF;
@@ -776,7 +782,7 @@ EOF
 		my ($revision, $binary) = @{$squashed->{'files'}->{$filename}};
 
 		$commitstr .= "\tadded:    $filename -> $revision\n";
-		cvs2git($filename, $revision, $gitdir, 1, $binary, $debug);
+		cvs2git($filename, $revision, $gitdir, 1, $binary, $maxerr, $debug);
 	}
 	cd($gitdir);
 	do_command(['git', 'add', '.'], {}, $debug);
@@ -793,11 +799,12 @@ EOF
 #      cvsdir    - CVS directory to use                                        #
 #      gitdir    - git directory to use for file                               #
 #      tmpfile   - temporary file to use for git comment                       #
+#      maxerr    - maximum number of anoncvs errors allowed for file           #
 #      debug     - 1 == debug, 2 == dry-run                                    #
 ################################################################################
-sub create_regular_commit(%$$$$)
+sub create_regular_commit(%$$$$$)
 {
-	my ($commitobj, $cvsdir, $gitdir, $tmpfile, $debug) = @_;
+	my ($commitobj, $cvsdir, $gitdir, $tmpfile, $maxerr, $debug) = @_;
 	my ($headline, $comment, $commitstr, $env);
 
 	$headline = trim_comment($commitobj->{'comment'});
@@ -820,14 +827,14 @@ EOF
 	foreach my $filename (sort(keys %{$commitobj->{'added'}}))
 	{
 		my ($revision, $binary) = @{$commitobj->{'added'}->{$filename}};
-		cvs2git($filename, $revision, $gitdir, 1, $binary, $debug);
+		cvs2git($filename, $revision, $gitdir, 1, $binary, $maxerr, $debug);
 		$commitstr .= "\tadded:    $filename -> $revision\n"
 	}
 
 	foreach my $filename (sort(keys %{$commitobj->{'updated'}}))
 	{
 		my ($revision, $binary) = @{$commitobj->{'updated'}->{$filename}};
-		cvs2git($filename, $revision, $gitdir, 0, $binary, $debug);
+		cvs2git($filename, $revision, $gitdir, 0, $binary, $maxerr, $debug);
 		$commitstr .= "\tupdated:  $filename -> $revision\n"
 	}
 	cd($gitdir);
@@ -850,13 +857,14 @@ EOF
 #      gitdir      -                                                           #
 #      end         -                                                           #
 #      squash_date -                                                           #
+#      maxerr      -                                                           #
 #      count       -                                                           #
 #      debug       -                                                           #
 # out: number of commits done                                                  #
 ################################################################################
 sub create_commits(%$$$$$)
 {
-	my ($commits, $cvsdir, $gitdir, $end, $squash_date, $count, $debug) = @_;
+	my ($commits, $cvsdir, $gitdir, $end, $squashdate, $maxerr, $count, $debug) = @_;
 	my (%revisions, $squashed, $i, $commitno);
 	my (undef, $tmpfile) = tempfile();
 
@@ -864,7 +872,7 @@ sub create_commits(%$$$$$)
 
 	if ($end)
 	{
-		warn "Processing $end of the $count total commits\n";
+		print "Converting $end of the $count total commits\n";
 		$count = $end
 	}
 	else
@@ -885,7 +893,7 @@ sub create_commits(%$$$$$)
 		$author .= " ($login)" unless $author eq $login;
 		chomp ($date = ctime($epoch));
 
-		if ($epoch <= $squash_date)
+		if ($epoch <= $squashdate)
 		{
 			warn "Skipping commit ${\(++$i)}/$count\n";
 			if (!$squashed)
@@ -903,7 +911,7 @@ sub create_commits(%$$$$$)
 			if ($squashed)
 			{
 				create_squash_commit($squashed, $cvsdir, $gitdir, $tmpfile,
-									 $debug);
+									 $maxerr, $debug);
 				 $squashed = undef;
 				++$commitno;
 			}
@@ -950,12 +958,12 @@ sub create_commits(%$$$$$)
 				$commitobj->{'updated'}->{$filename} = [ $revision, $binary ];
 				$squashed->{'files'}->{$filename} = [ $revision, $binary ] if ($squashed);
 			}
-
 		}
 
-		if ($epoch > $squash_date)
+		if ($epoch > $squashdate)
 		{
-			create_regular_commit($commitobj, $cvsdir, $gitdir, $tmpfile, $debug);
+			create_regular_commit($commitobj, $cvsdir, $gitdir, $tmpfile,
+								  $maxerr, $debug);
 			++$commitno;
 		}
 
@@ -963,7 +971,11 @@ sub create_commits(%$$$$$)
 	}
 
 	# all commits need to get squashed!
-	create_squash_commit($squashed, $cvsdir, $gitdir, $tmpfile, $debug) if ($squashed);
+	if ($squashed)
+	{
+		create_squash_commit($squashed, $cvsdir, $gitdir, $tmpfile,
+							 $maxerr, $debug)
+	}
 
 	unlink($tmpfile);
 	return $commitno;
@@ -1068,6 +1080,8 @@ sub parse_opts()
 		$opts->{'forcebinary'} = { 'regexp' => $opts->{'binfiles'} };
 	}
 
+	$opts->{'maxcvserrs'} = 4 if !defined $opts->{'maxcvserrs'};
+
 	if ($opts->{'update'})
 	{
 		delete $opts->{'update'};
@@ -1114,6 +1128,7 @@ sub main()
 							  $opts{'gitdir'},
 							  $opts{'maxcommits'},
 							  $opts{'squashdate'},
+							  $opts{'maxcvserrs'},
 							  $count,
 							  $opts{'debug'});
 
