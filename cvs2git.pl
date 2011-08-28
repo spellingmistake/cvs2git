@@ -850,16 +850,17 @@ EOF
 }
 
 ################################################################################
-# create_commits -                                                             #
-#                                                                              #
-# in:  commits     -                                                           #
-#      cvsdir      -                                                           #
-#      gitdir      -                                                           #
-#      end         -                                                           #
-#      squash_date -                                                           #
-#      maxerr      -                                                           #
-#      count       -                                                           #
-#      debug       -                                                           #
+# create_commits - create an actual commit from the parsed commit log hash ref #
+#                  maxcommits (end) and squashedate are evaluated, too.        #
+# in:  commits     - hash ref of the commit log as created by parse_commit_log #
+#      cvsdir      - CVS directory to use                                      #
+#      gitdir      - git directory to use for file                             #
+#      end         - maximum number of commits as specified with --maxcommits  #
+#      squashdate  - all CVS commits up to and including this point of time    #
+#                  - will be squashed into one single commit                   #
+#      maxerr      - maximum number of anoncvs errors allowed for file         #
+#      count       - number of commits processed by parse_commit_log           #
+#      debug       - 1 == debug, 2 == dry-run                                  #
 # out: number of commits done                                                  #
 ################################################################################
 sub create_commits(%$$$$$)
