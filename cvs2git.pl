@@ -751,7 +751,7 @@ sub create_squash_commit(%$$$$$) {
 	$commitstr = <<EOF;
 CVS import: Initial squash-commit
 
-This commit squashes $squashed->{'count'} commit(s) starting from
+This commit squashes $squashed->{'count'} commit(s) starting on
 $squashed->{'start'} ending $squashed->{'end'}
 into a single commit to simplify git history.
 
