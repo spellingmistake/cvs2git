@@ -1102,7 +1102,7 @@ sub parse_opts()
 		do_command(['git', '--git-dir', "$opts->{'gitdir'}/.git", 'log',
 				   '-n1', '--pretty="format:%at"', 'HEAD'],
 				   { 'stdout' => \$opts->{'update'} },
-				   ($opts->{'debug'} & (~2))) and die "You suck!";
+				   ($opts->{'debug'} & (~2))) and die "Unable to determine date of last converted commit";
 	}
 
 	return %$opts;
