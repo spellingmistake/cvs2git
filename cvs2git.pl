@@ -58,6 +58,7 @@ Convert CVS component in directory cvs_dir and store all commits in git_dir.
     --squashdate <date>       squash all commits up to <date> into a single one
     --finisher <scriptlet>    scriptlet to be executed after conversion process
     --binfiles <regexp>       treat files matching <regexp> as binary files
+    --ignorefiles <regexp>    do not import files matching <regexp> into git repo
     --maxcvserrs <number>     allow at most <number> of anoncvs errors per file
     --debug                   be verbose about what script is doing
     --dry-run                 simulate the conversion process
@@ -114,6 +115,9 @@ git_dir and number of commits as arguments.
 
 All files matching the <regexp> given with --binfiles are treated to be
 binary, see --force-binary.
+
+All files matching the <regexp> given with --ignorefiles are excluded
+from import into the git repository.
 
 The option --maxcvserrs can be used to override the default of four
 anoncvs errors allowed per file when performing update operations as anon
@@ -201,7 +205,6 @@ sub populate_commit_hash(%$$$)
 	if ($$rinfos->{'curr'}->{'rev'} !~ /^[0-9]+\.[0-9]+$/)
 	{
 		# skip all branch commits
-		delete $$rinfos->{'curr'};
 		return;
 	}
 	return if ($update and $update >= $$rinfos->{'curr'}->{'epoch'});
@@ -274,8 +277,6 @@ sub populate_commit_hash(%$$$)
 		}
 	}
 
-	# clear up info hash except for the filename
-	delete $$rinfos->{'curr'};
 	$$rinfos->{'filename'} = $filename;
 }
 
@@ -306,14 +307,15 @@ sub BUILD_COMMIT_LOG() { return 8; }
 #      prefix        prefix to remove from cvs path                            #
 #      noallow       allow unknown authors                                     #
 #      update        date to use with update options                           #
+#      ignorefiles   ignore files matching this regexp                         #
 #      binary        hash ref { 'all'/'regexp' } to set binary flag on all     #
 #                    files/those matching regexp                               #
 #      commits       hash ref to store results in                              #
 # out: number of commits                                                       #
 ################################################################################
-sub parse_commit_log($$$$%%)
+sub parse_commit_log($$$$$%%)
 {
-	my ($cmd, $prefix, $noallow, $update, $binary, $commits) = @_;
+	my ($cmd, $prefix, $noallow, $update, $ignorefiles, $binary, $commits) = @_;
 	my ($state, $infos, $tags, $count, $buf, $rest, $forcebinary, $regexp, %unknown_authors);
 
 	#print Data::Dumper->Dump([$binary], [qw/foo/]);
@@ -461,13 +463,11 @@ sub parse_commit_log($$$$%%)
 			{
 				if ($line eq ('-' x 28))
 				{
-					populate_commit_hash($commits, \$infos, \$count, $update);
 					$state = SKIP_TO_REVISION;
 				}
 				elsif($line eq ('=' x 77))
 				{
 					# last revision for file
-					populate_commit_hash($commits, \$infos, \$count, $update);
 					$state = INITIAL;
 
 				}
@@ -478,7 +478,14 @@ sub parse_commit_log($$$$%%)
 					{
 						push @{$infos->{'curr'}->{'comment'}}, "$line"
 					}
+					next;
 				}
+				if (!defined $ignorefiles or $infos->{'filename'} !~ /$ignorefiles/)
+				{
+					populate_commit_hash($commits, \$infos, \$count, $update);
+				}
+				# clear up info hash except for the filename
+				delete $infos->{'curr'};
 				next;
 			}
 		}
@@ -1022,6 +1029,7 @@ sub parse_opts()
 				'squashdate=s'    => \$opts->{'squashdate'},
 				'finisher=s'      => \$opts->{'finisher'},
 				'binfiles=s'      => \$opts->{'binfiles'},
+				'ignorefiles=s'   => \$opts->{'ignorefiles'},
 				'no-unknown'      => \$opts->{'nounknown'},
 				'prefix=s'        => \$opts->{'prefix'},
 				'force-binary'    => \$opts->{'forcebinary'},
@@ -1030,7 +1038,10 @@ sub parse_opts()
 				'debug'           => \$opts->{'debug'},
 				'help'            => \$opts->{'help'},
 				'longhelp'        => \$opts->{'longhelp'})
-				# TODO ignore list read authors from file
+				# TODO:
+				# * tags
+				# * read authors from file
+				# * change passing arguments, some subs use way to many of them
 	};
 
 	chomp ($args = $@) if $@;
@@ -1133,6 +1144,7 @@ sub main()
 							  $opts{'prefix'},
 							  $opts{'nounknown'},
 							  $opts{'update'},
+							  $opts{'ignorefiles'},
 							  $opts{'forcebinary'},
 							  \%commits);
 	#print Data::Dumper->Dump([\%commits], [qw/foo/]);
