@@ -36,10 +36,6 @@ use POSIX qw(dup2);
 use IPC::Open3;
 use Symbol;
 
-my %authors = (
-	'wasi'      => [ 'Thomas Egerer',      'thomas.washeim@gmx.net' ],
-);
-
 sub help($;$)
 {
 	my ($err, $long) = @_;
@@ -60,6 +56,7 @@ Convert CVS component in directory cvs_dir and store all commits in git_dir.
     --binfiles <regexp>       treat files matching <regexp> as binary files
     --ignorefiles <regexp>    do not import files matching <regexp> into git repo
     --maxcvserrs <number>     allow at most <number> of anoncvs errors per file
+	--authorfile <file>       load authors from <file>
     --debug                   be verbose about what script is doing
     --dry-run                 simulate the conversion process
     --no-unknown              do not allow unknown authors
@@ -124,6 +121,12 @@ anoncvs errors allowed per file when performing update operations as anon
 user on a CVS repo. Somehow this happened a lot during tests and was
 pretty annoying.
 
+The option --authorfile can be used to specify a file from which the
+author list should be obtained. Format is supposed to be the same as
+with svn2git:
+id = Author Name <mailing address>\n
+where mailing address can be ommited.
+
 Use --debug to see (almost) everything the script is doing during the
 conversion.
 
@@ -131,7 +134,7 @@ The --dry-run option simulates the conversion process without actually
 doing anything. You can use it with --debug to see what will be done during
 the conversion.
 
-The --no-unknown forces all authors to be known in the %authors hash. It
+The --no-unknown forces all authors to be known in the --authorfile. It
 can be used to get a commit log with complete author information for each
 author.
 
@@ -308,14 +311,15 @@ sub BUILD_COMMIT_LOG() { return 8; }
 #      noallow       allow unknown authors                                     #
 #      update        date to use with update options                           #
 #      ignorefiles   ignore files matching this regexp                         #
+#      authors       hash map of author's names and mailing addresses          #
 #      binary        hash ref { 'all'/'regexp' } to set binary flag on all     #
 #                    files/those matching regexp                               #
 #      commits       hash ref to store results in                              #
 # out: number of commits                                                       #
 ################################################################################
-sub parse_commit_log($$$$$%%)
+sub parse_commit_log($$$$$%%%)
 {
-	my ($cmd, $prefix, $noallow, $update, $ignorefiles, $binary, $commits) = @_;
+	my ($cmd, $prefix, $noallow, $update, $ignorefiles, $authors, $binary, $commits) = @_;
 	my ($state, $infos, $tags, $count, $buf, $rest, $forcebinary, $regexp, %unknown_authors);
 
 	#print Data::Dumper->Dump([$binary], [qw/foo/]);
@@ -431,7 +435,7 @@ sub parse_commit_log($$$$$%%)
 
 				if ($line =~ /author: (.*?);/)
 				{
-					$unknown_authors{$1} = 1 if (!defined $authors{$1} and $noallow);
+					$unknown_authors{$1} = 1 if (!defined $authors->{$1} and $noallow);
 					$infos->{'curr'}->{'author'} = $1;
 				}
 
@@ -514,6 +518,59 @@ sub parse_commit_log($$$$$%%)
 sub cd($)
 {
 	chdir $_[0] or die "Failed to change to directory '$_[0]': $!";
+}
+
+################################################################################
+# parse_authors - parse authors file/string into given hash ref.               #
+# in:  authors - hash ref to fill with author information                      #
+#      source  - where author information is take from: SCALAR ref, use string #
+#                directly, no ref, use string as a file name                   #
+################################################################################
+sub parse_authors($$)
+{
+	my ($authors, $source) = @_;
+	my ($str, $i);
+
+	$i = 1;
+	if (ref $source eq "SCALAR")
+	{
+		$str = $$source;
+	}
+	elsif (ref $source eq "")
+	{
+		local $/ = undef;
+		open S, "<$source" or die "Unable to open file $source: $!";
+		$str = <S>;
+		close S;
+	}
+	else
+	{
+		die "Unable to handle ref '${\(ref $source)}'";
+	}
+
+	foreach my $author (split /\n/, $str)
+	{
+		# skip empty lines and comments
+		if ($author =~ /^\s*$/ or $author =~ /^\s*#/)
+		{
+			++$i;
+			next;
+		}
+
+		if ($author =~ /^(.+) = (.*?)( <(.+)>)?$/)
+		{
+			if (defined $authors->{$1})
+			{
+				die "Author name redefinition of $1: $2 vs. $authors->{$1}->[0]";
+			}
+			$authors->{$1} = [ $2, $4 ];
+		}
+		else
+		{
+			die "Malformed author information, line $i: '$author'";
+		}
+		++$i;
+	}
 }
 
 ################################################################################
@@ -860,6 +917,7 @@ EOF
 # create_commits - create an actual commit from the parsed commit log hash ref #
 #                  maxcommits (end) and squashedate are evaluated, too.        #
 # in:  commits     - hash ref of the commit log as created by parse_commit_log #
+#      authors     - hash map of author's names and mailing addresses          #
 #      cvsdir      - CVS directory to use                                      #
 #      gitdir      - git directory to use for file                             #
 #      end         - maximum number of commits as specified with --maxcommits  #
@@ -870,9 +928,9 @@ EOF
 #      debug       - 1 == debug, 2 == dry-run                                  #
 # out: number of commits done                                                  #
 ################################################################################
-sub create_commits(%$$$$$)
+sub create_commits(%$$$$$%)
 {
-	my ($commits, $cvsdir, $gitdir, $end, $squashdate, $maxerr, $count, $debug) = @_;
+	my ($commits, $authors, $cvsdir, $gitdir, $end, $squashdate, $maxerr, $count, $debug) = @_;
 	my (%revisions, $squashed, $i, $commitno);
 	my (undef, $tmpfile) = tempfile();
 
@@ -902,8 +960,8 @@ sub create_commits(%$$$$$)
 		die "no files: $commit" if 0 == (scalar @{${$commits->{$commit}}{"files"}});
 
 		($epoch, undef, $login) = (split /\Q_|||_\E/, $commit);
-		($author, $mail) = (defined $authors{$login}) ?
-				@{$authors{$login}} : ($login, "unknown");
+		($author, $mail) = (defined $authors->{$login}) ?
+				@{$authors->{$login}} : ($login, "unknown");
 		$author .= " ($login)" unless $author eq $login;
 		chomp ($date = ctime($epoch));
 
@@ -1032,6 +1090,7 @@ sub parse_opts()
 				'ignorefiles=s'   => \$opts->{'ignorefiles'},
 				'no-unknown'      => \$opts->{'nounknown'},
 				'prefix=s'        => \$opts->{'prefix'},
+				'authorfile=s'    => \$opts->{'authorfile'},
 				'force-binary'    => \$opts->{'forcebinary'},
 				'dry-run'         => \$opts->{'dryrun'},
 				'update'          => \$opts->{'update'},
@@ -1040,7 +1099,6 @@ sub parse_opts()
 				'longhelp'        => \$opts->{'longhelp'})
 				# TODO:
 				# * tags
-				# * read authors from file
 				# * change passing arguments, some subs use way to many of them
 	};
 
@@ -1115,6 +1173,11 @@ sub parse_opts()
 				   { 'stdout' => \$opts->{'update'} },
 				   ($opts->{'debug'} & (~2))) and die "Unable to determine date of last converted commit";
 	}
+	$opts->{'authors'}=  {};
+	if ($opts->{'authorfile'})
+	{
+		parse_authors($opts->{'authors'}, $opts->{'authorfile'});
+	}
 
 	return %$opts;
 }
@@ -1145,11 +1208,13 @@ sub main()
 							  $opts{'nounknown'},
 							  $opts{'update'},
 							  $opts{'ignorefiles'},
+							  $opts{'authors'},
 							  $opts{'forcebinary'},
 							  \%commits);
 	#print Data::Dumper->Dump([\%commits], [qw/foo/]);
 	#exit;
 	$commits = create_commits(\%commits,
+							  $opts{'authors'},
 							  $opts{'cvsdir'},
 							  $opts{'gitdir'},
 							  $opts{'maxcommits'},
