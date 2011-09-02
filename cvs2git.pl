@@ -34,6 +34,7 @@ use IO::File;
 use IO::File qw();
 use POSIX qw(dup2);
 use IPC::Open3;
+use Cwd;
 use Symbol;
 
 sub help($;$)
@@ -1135,8 +1136,10 @@ sub parse_opts()
 
 	if (0 != system('git', '--git-dir', "$opts->{'gitdir'}/.git", 'rev-parse'))
 	{
+		my $cwd = getcwd();
 		cd($opts->{'gitdir'});
 		system('git', 'init') and die "unable to create empty git-repo: $!";
+		cd($cwd);
 	}
 
 	$opts->{'squashdate'} = defined $opts->{'squashdate'} ?
