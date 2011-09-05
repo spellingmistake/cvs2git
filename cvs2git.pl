@@ -308,6 +308,9 @@ sub BUILD_COMMIT_LOG() { return 8; }
 #                    unknown authors are complained about; results are stored  #
 #                    in $commits ref;                                          #
 # in:  cmd           command to execute for cvs log (e.g. a cat command)       #
+#      commits       hash ref to store results in                              #
+#      opts        - hash ref with options with the followoing options being   #
+#                    used:                                                     #
 #      prefix        prefix to remove from cvs path                            #
 #      noallow       allow unknown authors                                     #
 #      update        date to use with update options                           #
@@ -315,16 +318,19 @@ sub BUILD_COMMIT_LOG() { return 8; }
 #      authors       hash map of author's names and mailing addresses          #
 #      binary        hash ref { 'all'/'regexp' } to set binary flag on all     #
 #                    files/those matching regexp                               #
-#      commits       hash ref to store results in                              #
 # out: number of commits                                                       #
 ################################################################################
-sub parse_commit_log($$$$$%%%)
+sub parse_commit_log($%%)
 {
-	my ($cmd, $prefix, $noallow, $update, $ignorefiles, $authors, $binary, $commits) = @_;
+	my ($cmd, $commits, $opts) = @_;
 	my ($state, $infos, $tags, $count, $buf, $rest, $forcebinary, $regexp, %unknown_authors);
-
-	#print Data::Dumper->Dump([$binary], [qw/foo/]);
-	#exit;
+	my ($prefix, $noallow, $update, $ignorefiles, $authors, $binary) = (
+			$opts->{'prefix'},
+			$opts->{'nounknown'},
+			$opts->{'update'},
+			$opts->{'ignorefiles'},
+			$opts->{'authors'},
+			$opts->{'forcebinary'});
 
 	if (defined $binary)
 	{
@@ -918,6 +924,9 @@ EOF
 # create_commits - create an actual commit from the parsed commit log hash ref #
 #                  maxcommits (end) and squashedate are evaluated, too.        #
 # in:  commits     - hash ref of the commit log as created by parse_commit_log #
+#      count       - number of commits processed by parse_commit_log           #
+#      opts        - hash ref with options with the followoing options being   #
+#                    used:                                                     #
 #      authors     - hash map of author's names and mailing addresses          #
 #      cvsdir      - CVS directory to use                                      #
 #      gitdir      - git directory to use for file                             #
@@ -925,15 +934,22 @@ EOF
 #      squashdate  - all CVS commits up to and including this point of time    #
 #                  - will be squashed into one single commit                   #
 #      maxerr      - maximum number of anoncvs errors allowed for file         #
-#      count       - number of commits processed by parse_commit_log           #
 #      debug       - 1 == debug, 2 == dry-run                                  #
 # out: number of commits done                                                  #
 ################################################################################
-sub create_commits(%$$$$$%)
+sub create_commits(%$%)
 {
-	my ($commits, $authors, $cvsdir, $gitdir, $end, $squashdate, $maxerr, $count, $debug) = @_;
+	my ($commits, $count, $opts) = @_;
 	my (%revisions, $squashed, $i, $commitno);
 	my (undef, $tmpfile) = tempfile();
+	my ($authors, $cvsdir, $gitdir, $end, $squashdate, $maxerr, $debug) = (
+			$opts->{'authors'},
+			$opts->{'cvsdir'},
+			$opts->{'gitdir'},
+			$opts->{'maxcommits'},
+			$opts->{'squashdate'},
+			$opts->{'maxcvserrs'},
+			$opts->{'debug'});
 
 	$commitno = $i = 0;
 
@@ -1100,7 +1116,6 @@ sub parse_opts()
 				'longhelp'        => \$opts->{'longhelp'})
 				# TODO:
 				# * tags
-				# * change passing arguments, some subs use way to many of them
 	};
 
 	chomp ($args = $@) if $@;
@@ -1207,24 +1222,13 @@ sub main()
 	}
 
 	$count = parse_commit_log('cvs log -r1 2>/dev/null',
-							  $opts{'prefix'},
-							  $opts{'nounknown'},
-							  $opts{'update'},
-							  $opts{'ignorefiles'},
-							  $opts{'authors'},
-							  $opts{'forcebinary'},
-							  \%commits);
+							  \%commits ,
+							  \%opts);
 	#print Data::Dumper->Dump([\%commits], [qw/foo/]);
 	#exit;
 	$commits = create_commits(\%commits,
-							  $opts{'authors'},
-							  $opts{'cvsdir'},
-							  $opts{'gitdir'},
-							  $opts{'maxcommits'},
-							  $opts{'squashdate'},
-							  $opts{'maxcvserrs'},
 							  $count,
-							  $opts{'debug'});
+							  \%opts);
 
 	if ($opts{'finisher'})
 	{
